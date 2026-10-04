@@ -54,7 +54,7 @@ def read_props(r: Reader, count: int) -> list:
             raw = r.u16()
             if kind == Kind.CAPTURE_POINT and raw:
                 raise FormatError("capture point yaw must be 0")
-            p.angle = raw * 45.0 / 8192.0               # raw * 360 / 65536 (exact in binary)
+            p.rotation = raw * 45.0 / 8192.0            # yaw in degrees: raw * 360 / 65536 (exact in binary)
         else:
             p.rotation = Quaternion(**{f.name: r.s16() / 32767.0 for f in fields(Quaternion)})
             n = math.sqrt(sum(v ** 2 for v in astuple(p.rotation)))
@@ -83,12 +83,12 @@ def read_props(r: Reader, count: int) -> list:
 def write_props(w: Writer, props):
     for p in props:
         fl = 0
-        if p.angle is not None:
+        if isinstance(p.rotation, (int, float)):
             fl |= Flags.YAW
         elif p.kind != Kind.MODEL:
             raise ValueError("only models may use a full quaternion rotation")
-        elif p.rotation is None:
-            raise ValueError("prop needs angle or rotation")
+        elif not isinstance(p.rotation, Quaternion):
+            raise ValueError("prop needs rotation (a yaw angle in degrees, or a Quaternion)")
         if isinstance(p.scale, (int, float)):
             fl |= Flags.UNIFORM
         elif p.scale is not None:
@@ -107,7 +107,7 @@ def write_props(w: Writer, props):
         for c in astuple(p.position):
             w.varint(int(round(c * 128.0)))
         if fl & Flags.YAW:
-            w.u16(int(round(p.angle * 8192.0 / 45.0)) & 0xFFFF)
+            w.u16(int(round(p.rotation * 8192.0 / 45.0)) & 0xFFFF)
         else:
             for v in astuple(p.rotation):
                 w.s16(int(round(v * 32767.0)))

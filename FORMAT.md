@@ -9,8 +9,8 @@ caps (CustomMapCaps.Compute/ToBytes) - redundant summary of the props, every cou
   byte 9     capture points      byte 10  player spawns       (model props are not counted)
 
 ## Payload (CustomMapSerializer.ReadBody)
-env flags u8 (b0 water, b1 ice, b2 edge walls, b3 fog) | f32 time | u8 weather | u16 shadowDistance (units)
-| u8 fogMode | RGB | u16 fogDistance (units) | heightmap | paint | varuint numProps (<=20000) | props
+env flags u8 (b0 water, b1 ice, b2 edge walls, b3 fog) | f32 time | u8 weather (0 clear, 1 sunny, 2 cloudy, 3 rain) | u16 shadowDistance (units)
+| u8 fogMode (1 linear, 2 exponential, 3 exp_squared) | RGB | u16 fogDistance (units) | heightmap | paint | varuint numProps (<=20000) | props
 Units = 0.5 m (shadow 300 -> 150 m, fog 1500 -> 750 m).
 
 ### Heightmap  (ReadPredicted16 / Predict16)

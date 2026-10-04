@@ -31,6 +31,17 @@ class VehicleType(IntEnum):
     BOAT = 1 << 1
     PLANE = 1 << 2
 
+class Weather(IntEnum):
+    CLEAR = 0
+    SUNNY = 1
+    CLOUDY = 2
+    RAIN = 3
+
+class FogMode(IntEnum):
+    LINEAR = 1
+    EXPONENTIAL = 2
+    EXP_SQUARED = 3
+
 UNITS_PER_M = 2          # one game unit is 0.5 m
 NET_EPOCH_TICKS = 621355968000000000          # 1970-01-01 in .NET ticks
 
@@ -41,9 +52,9 @@ class Environment:
     edge_walls: bool = True
     fog: bool = False
     time: float = 0.85
-    weather: int = 1
+    weather: Weather = Weather.SUNNY
     shadow_distance_units: int = 300
-    fog_mode: int = 1
+    fog_mode: FogMode = FogMode.LINEAR
     fog_color: tuple = (0xA0, 0xAA, 0xB4)
     fog_distance_units: int = 1500
 
@@ -90,14 +101,13 @@ class Prop:
     kind: Kind
     position: Vec3                                 # metres (x, y up, z); resolution 1/128 m
     model_id: Optional[int] = None                 # kind == model
-    angle: Optional[float] = None                  # simple rotation (required for kinds != model)
-    rotation: Optional[Quaternion] = None          # full rotation as floats
+    rotation: Union[None, float, Quaternion] = None
     scale: Union[None, float, Vec3] = None         # float = uniform (capture point: radius), tuple = x, y, z
     color: Optional[Color] = None
     floors: Optional[int] = None
     collision: Optional[bool] = None
     team: Team = Team.FFA                          # spawn: 0 deathmatch, 1 red, 2 blue
-    vehicle_type: VehicleType = VehicleType.TANK     # spawn: 1, 2 or 4
+    vehicle_type: VehicleType = VehicleType.TANK   # spawn: 1, 2 or 4
     reserve: bool = False                          # spawn
     letter: Letter = Letter.A                      # capture point 0..3 = a..d
 

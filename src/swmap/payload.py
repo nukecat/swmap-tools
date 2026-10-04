@@ -2,9 +2,17 @@
 from __future__ import annotations
 import numpy as np
 from .binio import Reader, Writer, FormatError
-from .model import Environment, Terrain
+from .model import Environment, FogMode, Terrain, Weather
 from .props import read_props, write_props
 from . import terrain as T
+
+
+def _enum_or_int(cls, v: int):
+    """Known value -> enum member; anything else stays a plain int so such a map still loads and round-trips."""
+    try:
+        return cls(v)
+    except ValueError:
+        return v
 
 
 def decode_payload(data: bytes):
@@ -14,9 +22,9 @@ def decode_payload(data: bytes):
         raise FormatError(f"unknown environment flags {fl:#04x}")
     env = Environment(water=bool(fl & 1), ice=bool(fl & 2), edge_walls=bool(fl & 4), fog=bool(fl & 8))
     env.time = r.f32()
-    env.weather = r.u8()
+    env.weather = _enum_or_int(Weather, r.u8())
     env.shadow_distance_units = r.u16()
-    env.fog_mode = r.u8()
+    env.fog_mode = _enum_or_int(FogMode, r.u8())
     env.fog_color = (r.u8(), r.u8(), r.u8())
     env.fog_distance_units = r.u16()
 
@@ -43,9 +51,9 @@ def encode_payload(env: Environment, terr: Terrain, props) -> bytes:
     w = Writer()
     w.u8(int(env.water) | int(env.ice) << 1 | int(env.edge_walls) << 2 | int(env.fog) << 3)
     w.f32(env.time)
-    w.u8(env.weather)
+    w.u8(int(env.weather))
     w.u16(env.shadow_distance_units)
-    w.u8(env.fog_mode)
+    w.u8(int(env.fog_mode))
     for c in env.fog_color:
         w.u8(c)
     w.u16(env.fog_distance_units)

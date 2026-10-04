@@ -7,7 +7,7 @@ from .terrain import height_to_m
 
 
 def render_preview(terrain, size_m: float, width=640, height=320) -> bytes:
-    z = height_to_m(terrain.heights)
+    z = height_to_m(terrain.heights)[::-1]       # image row 0 = top = +z, like the PNGs in an unpacked folder
     n = z.shape[0]
     dz_dy, dz_dx = np.gradient(z, size_m / (n - 1))
     shade = np.clip(0.5 + 0.9 * (-dz_dx - dz_dy) / 2.0, 0, 1)

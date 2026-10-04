@@ -34,7 +34,7 @@ def cmd_unpack(a):
 
 def cmd_pack(a):
     src = Path(a.folder)
-    m = read_folder(src, regenerate_preview=a.regenerate_preview, touch=a.touch)
+    m = read_folder(src, regenerate_preview=a.regenerate_preview, touch=not a.no_touch)
     if not a.no_validate:
         issues = validate(m)
         if issues:
@@ -59,8 +59,8 @@ def cmd_info(a):
     from .terrain import height_to_m
     z = height_to_m(t.heights)
     print(f"  heights   {z.min():.1f} .. {z.max():.1f} m")
-    print(f"  env       water={e.water} ice={e.ice} walls={e.edge_walls} fog={e.fog} time={e.time:g} weather={e.weather} "
-          f"shadow={e.shadow_distance_m:g} m fog_mode={e.fog_mode} fog={e.fog_distance_m:g} m #{''.join('%02x' % c for c in e.fog_color)}")
+    print(f"  env       water={e.water} ice={e.ice} walls={e.edge_walls} fog={e.fog} time={e.time:g} weather={getattr(e.weather, 'name', e.weather)} "
+          f"shadow={e.shadow_distance_m:g} m fog_mode={getattr(e.fog_mode, 'name', e.fog_mode)} fog={e.fog_distance_m:g} m #{''.join('%02x' % c for c in e.fog_color)}")
     kinds = collections.Counter(Kind(q.kind).name.lower() for q in m.props)
     print(f"  props     {len(m.props)}   " + "  ".join(f"{k}={v}" for k, v in sorted(kinds.items())))
     models = collections.Counter(q.model_id for q in m.props if q.kind == Kind.MODEL)
@@ -135,8 +135,8 @@ def main(argv=None) -> int:
     s.add_argument("folder"); s.add_argument("-o", "--output", help="output file (default: <folder>.swmap)")
     s.add_argument("--no-validate", action="store_true", help="do not run the validity checks")
     s.add_argument("--regenerate-preview", action="store_true", help="replace preview.jpg by a generated top-down render")
-    s.add_argument("--touch", action="store_true", help="set the modified time to now")
-    s.add_argument("--level", type=int, default=6, help="zlib level (default 6, what the game uses)")
+    s.add_argument("--no-touch", action="store_true", help="keep the modified time from map.json (default: set it to now)")
+    s.add_argument("--level", type=int, default=None, help="zlib level (default: the map's original level, else 6)")
     s.set_defaults(fn=cmd_pack)
 
     s = sub.add_parser("info", help="summarise a .swmap file or unpacked folder")

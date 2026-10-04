@@ -16,12 +16,12 @@ import numpy as np
 from PIL import Image
 
 from .binio import FormatError
-from .model import (Color, Letter, Quaternion, SwMap, Header, Environment, Terrain, Prop, Vec3, VehicleType,
+from .model import (Color, FogMode, Letter, Quaternion, SwMap, Header, Environment, Terrain, Prop, Vec3, VehicleType, Weather,
                     now_ticks, ticks_to_iso, iso_to_ticks, Kind, Team)
 from .preview import render_preview
 from . import terrain as T
 
-FORMAT = "swmap-folder/2"
+FORMAT = "swmap-folder/4"
 
 def _f32(x: float) -> float:
     """Shortest decimal that still round-trips to the same float32 (nicer JSON: 0.85, not 0.8500000238)."""
@@ -40,11 +40,6 @@ def _unhex(s: str):
 
 
 # ---------------------------------------------------------------- props <-> json
-_COLLISION_TO_JSON = {True: "on", False: "off"}
-_COLLISION_FROM_JSON = {"default": None, "on": True, "off": False}
-_TEAM_JSON = {Team.FFA: "deathmatch", Team.RED: "red", Team.BLUE: "blue"}     # documented names (enum calls it FFA)
-_TEAM_FROM_JSON = {**{v: k for k, v in _TEAM_JSON.items()}, "ffa": Team.FFA}
-
 
 def _xyz(v) -> dict:
     return {"x": v.x, "y": v.y, "z": v.z}
@@ -66,6 +61,24 @@ def _enum_from_name(cls, value, what):
         raise ValueError(f"unknown {what} {value!r} (expected one of: {names})") from None
 
 
+def _enum_json(cls, v):
+    """enum member -> lowercase name; a value outside the enum stays a number."""
+    try:
+        return cls(v).name.lower()
+    except ValueError:
+        return int(v)
+
+
+def _enum_or_int(cls, value, what):
+    """'rain' / 'RAIN' / 3 -> member. Numbers the game does not define are kept as plain ints (validate warns)."""
+    if isinstance(value, str):
+        return _enum_from_name(cls, value, what)
+    try:
+        return cls(int(value))
+    except ValueError:
+        return int(value)
+
+
 def prop_to_json(p: Prop) -> dict:
     d = {"kind": Kind(p.kind).name.lower()}
     if p.kind == Kind.MODEL:
@@ -73,12 +86,11 @@ def prop_to_json(p: Prop) -> dict:
     d["position"] = _xyz(p.position)                       # metres, y is up (exact: multiples of 1/128)
     if p.kind == Kind.CAPTURE_POINT:
         pass                                               # capture points cannot be rotated (always 0)
-    elif p.angle is not None:
-        d["yaw_deg"] = round(p.angle, 4)                   # stored in steps of 360/65536 deg
+    elif isinstance(p.rotation, (int, float)):
+        d["rotation"] = round(p.rotation, 4)               # yaw in degrees, stored in steps of 360/65536
     else:
-        # rotation, stored as signed 16-bit / 32767. The game normalises it on load.
-        q = p.rotation
-        d["rotation"] = {k: float(getattr(q, k)) for k in "xyzw"}
+        # full rotation, stored as signed 16-bit / 32767. The game normalises it on load.
+        d["rotation"] = {k: float(getattr(p.rotation, k)) for k in "xyzw"}
     if p.scale is not None:
         if isinstance(p.scale, (int, float)):
             d["radius" if p.kind == Kind.CAPTURE_POINT else "size"] = _f32(p.scale)
@@ -87,10 +99,10 @@ def prop_to_json(p: Prop) -> dict:
     if p.kind == Kind.MODEL:
         if p.color is not None: d["color"] = _hex(astuple(p.color))
         if p.floors is not None: d["floors"] = p.floors
-        if p.collision is not None: d["collision"] = _COLLISION_TO_JSON[p.collision]
+        if p.collision is not None: d["collision"] = p.collision          # true / false; absent = game default
     elif p.kind == Kind.SPAWN:
-        d["team"] = _TEAM_JSON[Team(p.team)]
-        d["vehicle"] = VehicleType(p.vehicle_type).name.lower()
+        d["team"] = Team(p.team).name.lower()
+        d["vehicle_type"] = VehicleType(p.vehicle_type).name.lower()
         if p.reserve: d["reserve"] = True
     elif p.kind == Kind.CAPTURE_POINT:
         d["letter"] = Letter(p.letter).name.lower()
@@ -102,33 +114,32 @@ def prop_from_json(d: dict) -> Prop:
     p = Prop(kind=kind, position=_unxyz(d["position"], "position"))
     if kind == Kind.MODEL:
         p.model_id = int(d["model_id"])
-    if "rotation" in d:
-        if "yaw_deg" in d:
-            raise ValueError("use either yaw_deg or rotation, not both")
-        q = d["rotation"]
-        p.rotation = Quaternion(*(float(q[k]) for k in "xyzw"))
+    r = d.get("rotation", 0.0)
+    if isinstance(r, dict):
+        try:
+            p.rotation = Quaternion(*(float(r[k]) for k in "xyzw"))
+        except (TypeError, KeyError):
+            raise ValueError(f"rotation must be a number (degrees) or an object like "
+                             f"{{\"x\": 0, \"y\": 0, \"z\": 0, \"w\": 1}}, got {r!r}") from None
     else:
-        p.angle = float(d.get("yaw_deg", 0.0))
+        p.rotation = float(r)
     if "radius" in d or "size" in d:
         if "scale" in d:
             raise ValueError("use either size/radius or scale, not both")
-        p.scale = float(d.get("radius", d.get("size")))
+        p.scale = float(d["radius"] if "radius" in d else d["size"])
     elif "scale" in d:
         p.scale = _unxyz(d["scale"], "scale")
     if kind == Kind.MODEL:
         if "color" in d: p.color = Color(*_unhex(d["color"]))
         if "floors" in d: p.floors = int(d["floors"])
-        c = d.get("collision", "default")
-        if c not in _COLLISION_FROM_JSON:
-            raise ValueError(f"collision must be default, on or off, got {c!r}")
-        p.collision = _COLLISION_FROM_JSON[c]
+        c = d.get("collision")
+        if c is not None and not isinstance(c, bool):
+            raise ValueError(f"collision must be true or false (or left out for the default), got {c!r}")
+        p.collision = c
     elif kind == Kind.SPAWN:
-        t = d.get("team", "deathmatch")
-        if isinstance(t, str) and t.lower() in _TEAM_FROM_JSON:
-            p.team = _TEAM_FROM_JSON[t.lower()]
-        else:
-            p.team = _enum_from_name(Team, t, "team")
-        p.vehicle_type = _enum_from_name(VehicleType, d.get("vehicle", "tank"), "vehicle")
+        t = d.get("team", "ffa")
+        p.team = Team.FFA if isinstance(t, str) and t.lower() == "deathmatch" else _enum_from_name(Team, t, "team")
+        p.vehicle_type = _enum_from_name(VehicleType, d.get("vehicle_type", "tank"), "vehicle_type")
         p.reserve = bool(d.get("reserve", False))
     elif kind == Kind.CAPTURE_POINT:
         p.letter = _enum_from_name(Letter, d.get("letter", "a"), "letter")
@@ -136,12 +147,14 @@ def prop_from_json(d: dict) -> Prop:
 
 
 # ---------------------------------------------------------------- png helpers
+# Terrain arrays are indexed [z, x] with row 0 at z = -size/2. Images have row 0 at the top, so the arrays are flipped
+# along the y axis of the image: the top of every PNG is +z, the left edge is -x (a top-down view of the map).
 def _save_png16(a, path):
-    Image.fromarray(np.asarray(a, dtype=np.uint16)).save(path)
+    Image.fromarray(np.ascontiguousarray(np.asarray(a, dtype=np.uint16)[::-1])).save(path)
 
 
 def _save_png8(a, path):
-    Image.fromarray(np.asarray(a, dtype=np.uint8), "L").save(path)
+    Image.fromarray(np.ascontiguousarray(np.asarray(a, dtype=np.uint8)[::-1]), "L").save(path)
 
 
 def _load_gray(path, dtype):
@@ -150,10 +163,10 @@ def _load_gray(path, dtype):
         if im.mode not in ("I;16", "I;16L", "I"):
             raise FormatError(f"{path.name}: expected a 16-bit grayscale PNG, got mode {im.mode}. "
                               "Save the heightmap as 16-bit grayscale.")
-        return np.array(im).astype(np.uint16)
+        return np.ascontiguousarray(np.array(im).astype(np.uint16)[::-1])
     if im.mode not in ("L", "P"):
         im = im.convert("L")
-    return np.array(im).astype(np.uint8)
+    return np.ascontiguousarray(np.array(im).astype(np.uint8)[::-1])
 
 
 # ---------------------------------------------------------------- folder IO
@@ -171,15 +184,20 @@ def write_folder(m: SwMap, folder, force=False, derived=True):
         "modified": ticks_to_iso(h.modified_ticks),
         "environment": {
             "water": e.water, "ice": e.ice, "edge_walls": e.edge_walls, "fog": e.fog,
-            "time": _f32(e.time), "weather": e.weather,
+            "time": _f32(e.time), "weather": _enum_json(Weather, e.weather),
             "shadow_distance_m": e.shadow_distance_units / 2,
-            "fog_mode": e.fog_mode, "fog_color": _hex(e.fog_color),
+            "fog_mode": _enum_json(FogMode, e.fog_mode), "fog_color": _hex(e.fog_color),
             "fog_distance_m": e.fog_distance_units / 2,
         },
         "paint_layer_ids": t.layer_ids,
     }
     if h.version != 1:
         meta["container_version"] = h.version
+    level = getattr(m, "deflate_level", None)
+    if level not in (None, 6):                         # the game has also written level 9; keeps pack byte-identical
+        meta["deflate_level"] = level
+    if not m.preview_jpg and getattr(m, "loaded_from_file", False):
+        meta["preview"] = False                        # the original map has no preview; do not invent one
     if not t.layers:                                   # only then the resolution is not implied by a PNG
         meta["paint_resolution"] = t.paint_resolution
     (folder / "map.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
@@ -196,7 +214,7 @@ def write_folder(m: SwMap, folder, force=False, derived=True):
         d.mkdir(exist_ok=True)
         if t.layers:
             _save_png8(T.base_layer(t.layers), d / "paint_00_base.png")
-        z = T.height_to_m(t.heights)
+        z = T.height_to_m(t.heights)[::-1]
         span = max(float(z.max() - z.min()), 1e-9)
         Image.fromarray(((z - z.min()) / span * 255).astype(np.uint8), "L").save(d / "heightmap_preview.png")
         (d / "NOTE.txt").write_text("Generated for convenience. `swmap pack` ignores this folder.\n")
@@ -217,9 +235,9 @@ def read_folder(folder, regenerate_preview=False, touch=False) -> SwMap:
         header.modified_ticks = now_ticks()
     env = Environment(
         water=bool(ev["water"]), ice=bool(ev["ice"]), edge_walls=bool(ev["edge_walls"]), fog=bool(ev["fog"]),
-        time=float(ev["time"]), weather=int(ev["weather"]),
+        time=float(ev["time"]), weather=_enum_or_int(Weather, ev["weather"], "weather"),
         shadow_distance_units=int(round(float(ev["shadow_distance_m"]) * 2)),
-        fog_mode=int(ev["fog_mode"]), fog_color=_unhex(ev["fog_color"]),
+        fog_mode=_enum_or_int(FogMode, ev["fog_mode"], "fog_mode"), fog_color=_unhex(ev["fog_color"]),
         fog_distance_units=int(round(float(ev["fog_distance_m"]) * 2)))
     heights = _load_gray(folder / "terrain" / "heightmap.png", np.uint16)
     ids = [int(i) for i in meta["paint_layer_ids"]]
@@ -234,19 +252,25 @@ def read_folder(folder, regenerate_preview=False, touch=False) -> SwMap:
     if not isinstance(objs, list):
         raise FormatError("objects.json must be a JSON array of objects")
     props = [prop_from_json(d) for d in objs]
-    jpg = b""
     pj = folder / "preview.jpg"
+    keep_no_preview = False
     if pj.exists() and not regenerate_preview:
         jpg = pj.read_bytes()
+    elif meta.get("preview") is False and not regenerate_preview:
+        jpg, keep_no_preview = b"", True               # unpacked from a map that had none
     else:
         jpg = render_preview(terr, header.size_m)
-    return SwMap(header, env, terr, props, jpg)
+    m = SwMap(header, env, terr, props, jpg)
+    if "deflate_level" in meta:
+        m.deflate_level = int(meta["deflate_level"])
+    m.loaded_from_file = keep_no_preview
+    return m
 
 
 README = """Unpacked .swmap
 ===============
 map.json            name, author, GUID, size, modified time, environment (distances in metres), paint layer ids
-objects.json        array of props. position {x, y (up), z} in metres; yaw_deg or rotation; kinds:
+objects.json        array of props. position {x, y (up), z} in metres; rotation (degrees, or {x,y,z,w}); kinds:
                     model | spawn (team, vehicle: tank/boat/plane) | capture_point (radius, letter) | player_spawn
 terrain/heightmap.png   16-bit grayscale. metres = value * 500 / 65536 - 100   (-100 .. 400 m)
 terrain/paint_NN.png    8-bit grayscale weight of paint layer NN. Layer 00 (the base) is implied:

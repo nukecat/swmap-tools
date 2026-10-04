@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from dataclasses import astuple
-from .model import Color, Kind, Letter, Quaternion, SwMap, Team, Vec3, VehicleType
+from .model import Color, FogMode, Kind, Letter, Quaternion, SwMap, Team, Vec3, VehicleType, Weather
 
 
 @dataclass
@@ -39,6 +39,12 @@ def validate(m: SwMap) -> list:
         E("environment", "fog colour components must be 0..255")
     if not 0 <= env.weather <= 255:
         E("environment", "weather must be a byte")
+    elif env.weather not in tuple(Weather):
+        W("environment", f"weather {int(env.weather)} is not a known value ({', '.join(f'{m.name.lower()}={m.value}' for m in Weather)})")
+    if not 0 <= env.fog_mode <= 255:
+        E("environment", "fog_mode must be a byte")
+    elif env.fog_mode not in tuple(FogMode):
+        W("environment", f"fog_mode {int(env.fog_mode)} is not a known value ({', '.join(f'{m.name.lower()}={m.value}' for m in FogMode)})")
     if env.ice and not env.water:
         W("environment", "ice without water has no effect")
 
@@ -85,17 +91,17 @@ def validate(m: SwMap) -> list:
                 E(w, "colour components must be 0..255")
             if p.collision not in (None, True, False):
                 E(w, f"collision {p.collision!r}")
-            if p.angle is None:
+            if not isinstance(p.rotation, (int, float)):
                 if not isinstance(p.rotation, Quaternion):
-                    E(w, "needs angle or rotation")
+                    E(w, "needs rotation (angle in degrees or quaternion)")
                 else:
                     nn = math.sqrt(sum(c ** 2 for c in astuple(p.rotation)))
                     if not 0.9 <= nn <= 1.1:
                         E(w, "quaternion length must be 0.9..1.1")
         else:
-            if p.angle is None:
-                E(w, "this kind only supports yaw_deg")
-            if p.kind == Kind.CAPTURE_POINT and p.angle:
+            if not isinstance(p.rotation, (int, float)):
+                E(w, "this kind only supports a plain angle (rotation in degrees)")
+            if p.kind == Kind.CAPTURE_POINT and p.rotation:
                 E(w, "capture points cannot be rotated")
         if p.scale is not None:
             vals = [p.scale] if isinstance(p.scale, (int, float)) else list(astuple(p.scale))

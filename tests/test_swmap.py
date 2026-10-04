@@ -53,14 +53,14 @@ def test_known_heights():
 # ---------------------------------------------------------------- props
 def all_kinds():
     return [
-        Prop(Kind.MODEL, Vec3(-4.0, 2.078125, -13.4765625), model_id=1, angle=0x907A * 45.0 / 8192.0),   # the palm tree: stored yaw is quantised to 360/65536 degrees
+        Prop(Kind.MODEL, Vec3(-4.0, 2.078125, -13.4765625), model_id=1, rotation=0x907A * 45.0 / 8192.0),   # the palm tree: stored yaw is quantised to 360/65536 degrees
         Prop(Kind.MODEL, Vec3(1.5, 2.0, 3.0), model_id=300, rotation=Quaternion(0, 23170 / 32767, 0, 23170 / 32767), scale=Vec3(1.0, 2.0, 3.0),
              color=Color(1, 2, 3), floors=40, collision=True),
-        Prop(Kind.MODEL, Vec3(0.0, 0.0, 0.0), model_id=0, angle=0.0, scale=2.5, collision=False),
-        Prop(Kind.SPAWN, Vec3(5.0, 3.0, 5.0), angle=45.0, team=Team.BLUE, vehicle_type=VehicleType.PLANE, reserve=True),
-        Prop(Kind.SPAWN, Vec3(6.0, 3.0, 5.0), angle=45.0, team=Team.FFA, vehicle_type=VehicleType.BOAT),
-        Prop(Kind.CAPTURE_POINT, Vec3(7.0, 3.0, 5.0), angle=0.0, scale=30.0, letter=Letter.A),
-        Prop(Kind.PLAYER_SPAWN, Vec3(0.0, 3.5, 0.0), angle=0.0),
+        Prop(Kind.MODEL, Vec3(0.0, 0.0, 0.0), model_id=0, rotation=0.0, scale=2.5, collision=False),
+        Prop(Kind.SPAWN, Vec3(5.0, 3.0, 5.0), rotation=45.0, team=Team.BLUE, vehicle_type=VehicleType.PLANE, reserve=True),
+        Prop(Kind.SPAWN, Vec3(6.0, 3.0, 5.0), rotation=45.0, team=Team.FFA, vehicle_type=VehicleType.BOAT),
+        Prop(Kind.CAPTURE_POINT, Vec3(7.0, 3.0, 5.0), rotation=0.0, scale=30.0, letter=Letter.A),
+        Prop(Kind.PLAYER_SPAWN, Vec3(0.0, 3.5, 0.0), rotation=0.0),
     ]
 
 
@@ -82,7 +82,7 @@ def test_full_map_roundtrip_in_memory_and_folder(tmp_path):
 def test_caps():
     caps = compute_caps(all_kinds())
     assert caps == [0, 1, 0, 0, 0, 0, 0, 0, 1, 1, 1]     # ffa boat; blue plane; 1 capture point; 1 player spawn
-    many = [Prop(Kind.SPAWN, Vec3(0, 0, 0), angle=0.0, team=Team.RED, vehicle_type=VehicleType.TANK)] * 300
+    many = [Prop(Kind.SPAWN, Vec3(0, 0, 0), rotation=0.0, team=Team.RED, vehicle_type=VehicleType.TANK)] * 300
     assert compute_caps(many)[3] == 255                  # saturates
 
 
@@ -91,7 +91,7 @@ def test_caps():
     (lambda m: setattr(m.props[0], "scale", 0.01), "scale"),
     (lambda m: setattr(m.props[0], "floors", 41), "floors"),
     (lambda m: setattr(m.props[3], "vehicle_type", 3), "vehicle_type"),
-    (lambda m: setattr(m.props[5], "angle", 10.0), "rotated"),
+    (lambda m: setattr(m.props[5], "rotation", 10.0), "rotated"),
     (lambda m: setattr(m.props[0], "position", Vec3(0, 5000, 0)), "outside"),
     (lambda m: setattr(m.environment, "shadow_distance_units", 5), "shadow"),
 ])
@@ -141,8 +141,8 @@ def test_json_has_no_redundant_info_and_no_fixed_size_arrays(tmp_path):
         assert set(o["position"]) == {"x", "y", "z"}
         for k in ("scale",):
             if k in o: assert set(o[k]) == {"x", "y", "z"}
-        if "quaternion" in o:
-            assert set(o["quaternion"]) == {"x", "y", "z", "w"} and all(isinstance(v, float) for v in o["quaternion"].values())
+        if isinstance(o.get("rotation"), dict):
+            assert set(o["rotation"]) == {"x", "y", "z", "w"} and all(isinstance(v, float) for v in o["rotation"].values())
     # nothing but dicts / scalars except the variable-length layer id list
     def no_lists(v, path=""):
         if isinstance(v, dict):
@@ -170,11 +170,11 @@ def test_yaw_and_position_roundtrip_through_json():
     for _ in range(2000):
         raw = rng.randint(0, 65535)
         p = Prop(Kind.MODEL, Vec3(*(rng.randint(-100000, 100000) / 128.0 for _ in range(3))), model_id=2,
-                 angle=raw * 45.0 / 8192.0)
+                 rotation=raw * 45.0 / 8192.0)
         back = prop_from_json(json.loads(json.dumps(prop_to_json(p))))
         assert back.position == p.position
         # the JSON shows yaw rounded to 4 decimals; what is stored (a 16-bit step) must be unchanged
-        assert int(round(back.angle * 8192.0 / 45.0)) & 0xFFFF == raw
+        assert int(round(back.rotation * 8192.0 / 45.0)) & 0xFFFF == raw
 
 
 def test_timestamp_is_lossless():
@@ -182,3 +182,77 @@ def test_timestamp_is_lossless():
     for t in (639266060456442096, 621355968000000000, 639000000000000001, 0 + 864000000000):
         assert iso_to_ticks(ticks_to_iso(t)) == t
     assert iso_to_ticks("2026-10-03T06:34:05Z") == iso_to_ticks("2026-10-03T06:34:05.0000000Z")
+
+
+def test_prop_json_uses_model_field_names():
+    from swmap.folder import prop_to_json, prop_from_json
+    spawn = Prop(Kind.SPAWN, Vec3(1, 2, 3), rotation=90.0, team=Team.RED, vehicle_type=VehicleType.BOAT, reserve=True)
+    assert prop_to_json(spawn) == {"kind": "spawn", "position": {"x": 1, "y": 2, "z": 3}, "rotation": 90.0,
+                                   "team": "red", "vehicle_type": "boat", "reserve": True}
+    model = Prop(Kind.MODEL, Vec3(0, 0, 0), model_id=3, rotation=0.0, scale=2.0, collision=False)
+    j = prop_to_json(model)
+    assert j["size"] == 2.0 and j["collision"] is False
+    assert prop_from_json(j) == model
+    assert "collision" not in prop_to_json(Prop(Kind.MODEL, Vec3(0, 0, 0), model_id=3, rotation=0.0))   # default = omitted
+    # legacy team name still readable
+    assert prop_from_json({"kind": "spawn", "position": {"x": 0, "y": 0, "z": 0}, "team": "deathmatch"}).team == Team.FFA
+    with pytest.raises(ValueError):
+        prop_from_json({"kind": "model", "model_id": 1, "position": {"x": 0, "y": 0, "z": 0}, "collision": "on"})
+
+
+def test_weather_and_fog_mode_enums(tmp_path):
+    import json
+    from swmap.model import FogMode, Weather
+    assert [(w.name, w.value) for w in Weather] == [("CLEAR", 0), ("SUNNY", 1), ("CLOUDY", 2), ("RAIN", 3)]
+    assert [(f.name, f.value) for f in FogMode] == [("LINEAR", 1), ("EXPONENTIAL", 2), ("EXP_SQUARED", 3)]
+    m = swmap.SwMap.new("T", "a", 512, 129, 128)
+    m.environment.weather, m.environment.fog_mode = Weather.RAIN, FogMode.EXP_SQUARED
+    m2 = swmap.loads(swmap.dumps(m))
+    assert m2.environment.weather is Weather.RAIN and m2.environment.fog_mode is FogMode.EXP_SQUARED
+    write_folder(m2, tmp_path / "f")
+    env = json.loads((tmp_path / "f" / "map.json").read_text())["environment"]
+    assert env["weather"] == "rain" and env["fog_mode"] == "exp_squared"
+    env["weather"], env["fog_mode"] = "CLOUDY", 2                       # names (any case) and numbers both load
+    meta = json.loads((tmp_path / "f" / "map.json").read_text()); meta["environment"] = env
+    (tmp_path / "f" / "map.json").write_text(json.dumps(meta))
+    m3 = read_folder(tmp_path / "f")
+    assert m3.environment.weather is Weather.CLOUDY and m3.environment.fog_mode is FogMode.EXPONENTIAL
+
+
+def test_unknown_weather_value_survives_with_warning(tmp_path):
+    m = swmap.SwMap.new("T", "a", 512, 129, 128)
+    m.environment.weather, m.environment.fog_mode = 9, 0
+    m2 = swmap.loads(swmap.dumps(m))
+    assert m2.environment.weather == 9 and m2.environment.fog_mode == 0
+    assert swmap.dumps(m2) == swmap.dumps(m)
+    write_folder(m2, tmp_path / "f")
+    assert swmap.dumps(read_folder(tmp_path / "f")) == swmap.dumps(m)
+    issues = swmap.validate(m2)
+    assert not [i for i in issues if i.level == "error"]
+    assert sum("not a known value" in i.message for i in issues) == 2
+
+
+def test_pack_touches_modified_time_unless_no_touch(tmp_path):
+    from swmap.cli import main
+    m = swmap.SwMap.new("T", "a", 512, 129, 128)
+    m.header.modified_ticks = 639000000000000000
+    write_folder(m, tmp_path / "f")
+    main(["pack", str(tmp_path / "f"), "-o", str(tmp_path / "a.swmap")])
+    main(["pack", str(tmp_path / "f"), "--no-touch", "-o", str(tmp_path / "b.swmap")])
+    assert swmap.load(tmp_path / "a.swmap").header.modified_ticks > 639000000000000000
+    assert swmap.load(tmp_path / "b.swmap").header.modified_ticks == 639000000000000000
+
+
+def test_pngs_are_top_down_with_plus_z_at_the_top(tmp_path):
+    from PIL import Image
+    m = swmap.SwMap.new("T", "a", 512, 129, 128)
+    m.terrain.heights[0, :] = 40000            # array row 0 = z = -size/2  -> bottom of the image
+    m.terrain.heights[-1, 0] = 50000           # last row (z = +size/2), first column (x = -size/2) -> top-left
+    m.terrain.layers[0][0, :] = 200
+    write_folder(m, tmp_path / "f")
+    hm = np.array(Image.open(tmp_path / "f" / "terrain" / "heightmap.png"))
+    assert (hm[-1, :] == 40000).all() and hm[0, 0] == 50000
+    paint = np.array(Image.open(tmp_path / "f" / "terrain" / "paint_01.png"))
+    assert (paint[-1, :] == 200).all() and not paint[0].any()
+    m2 = read_folder(tmp_path / "f")
+    assert (m2.terrain.heights == m.terrain.heights).all() and (m2.terrain.layers[0] == m.terrain.layers[0]).all()

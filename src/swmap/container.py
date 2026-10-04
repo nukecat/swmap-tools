@@ -41,7 +41,7 @@ def read_container(data: bytes) -> Container:
 
 
 def compress(payload: bytes, level: int = 6) -> bytes:
-    """The game uses zlib level 6, raw deflate (verified byte-identical on all samples)."""
+    """The game uses zlib level 6, raw deflate (the game has also written level 9; fileio.loads detects it)."""
     c = zlib.compressobj(level, zlib.DEFLATED, -15, 8)
     return c.compress(payload) + c.flush()
 

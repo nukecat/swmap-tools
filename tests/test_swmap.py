@@ -9,7 +9,7 @@ from swmap import terrain as T
 from swmap.binio import FormatError, Reader, Writer
 from swmap.caps import compute_caps
 from swmap.folder import read_folder, write_folder
-from swmap.model import Prop, KIND_MODEL, KIND_SPAWN, KIND_CAPTURE_POINT, KIND_PLAYER_SPAWN
+from swmap.model import Color, Letter, Prop, Kind, Quaternion, Team, Vec3, VehicleType
 
 SAMPLES = sorted(glob.glob(os.path.join(os.environ.get("SWMAP_SAMPLES", "/nonexistent"), "*.swmap")))
 
@@ -53,14 +53,14 @@ def test_known_heights():
 # ---------------------------------------------------------------- props
 def all_kinds():
     return [
-        Prop(KIND_MODEL, (-4.0, 2.078125, -13.4765625), model_id=1, yaw_deg=0x907A * 45.0 / 8192.0),   # the palm tree: stored yaw is quantised to 360/65536 degrees
-        Prop(KIND_MODEL, (1.5, 2.0, 3.0), model_id=300, quat_s16=(0, 23170, 0, 23170), scale=(1.0, 2.0, 3.0),
-             color=(1, 2, 3), floors=40, collision="on"),
-        Prop(KIND_MODEL, (0.0, 0.0, 0.0), model_id=0, yaw_deg=0.0, scale=2.5, collision="off"),
-        Prop(KIND_SPAWN, (5.0, 3.0, 5.0), yaw_deg=45.0, team=2, spawn_type=4, reserve=True),
-        Prop(KIND_SPAWN, (6.0, 3.0, 5.0), yaw_deg=45.0, team=0, spawn_type=2),
-        Prop(KIND_CAPTURE_POINT, (7.0, 3.0, 5.0), yaw_deg=0.0, scale=30.0, letter=3),
-        Prop(KIND_PLAYER_SPAWN, (0.0, 3.5, 0.0), yaw_deg=0.0),
+        Prop(Kind.MODEL, Vec3(-4.0, 2.078125, -13.4765625), model_id=1, angle=0x907A * 45.0 / 8192.0),   # the palm tree: stored yaw is quantised to 360/65536 degrees
+        Prop(Kind.MODEL, Vec3(1.5, 2.0, 3.0), model_id=300, rotation=Quaternion(0, 23170 / 32767, 0, 23170 / 32767), scale=Vec3(1.0, 2.0, 3.0),
+             color=Color(1, 2, 3), floors=40, collision=True),
+        Prop(Kind.MODEL, Vec3(0.0, 0.0, 0.0), model_id=0, angle=0.0, scale=2.5, collision=False),
+        Prop(Kind.SPAWN, Vec3(5.0, 3.0, 5.0), angle=45.0, team=Team.BLUE, vehicle_type=VehicleType.PLANE, reserve=True),
+        Prop(Kind.SPAWN, Vec3(6.0, 3.0, 5.0), angle=45.0, team=Team.FFA, vehicle_type=VehicleType.BOAT),
+        Prop(Kind.CAPTURE_POINT, Vec3(7.0, 3.0, 5.0), angle=0.0, scale=30.0, letter=Letter.A),
+        Prop(Kind.PLAYER_SPAWN, Vec3(0.0, 3.5, 0.0), angle=0.0),
     ]
 
 
@@ -82,7 +82,7 @@ def test_full_map_roundtrip_in_memory_and_folder(tmp_path):
 def test_caps():
     caps = compute_caps(all_kinds())
     assert caps == [0, 1, 0, 0, 0, 0, 0, 0, 1, 1, 1]     # ffa boat; blue plane; 1 capture point; 1 player spawn
-    many = [Prop(KIND_SPAWN, (0, 0, 0), yaw_deg=0.0, team=1, spawn_type=1)] * 300
+    many = [Prop(Kind.SPAWN, Vec3(0, 0, 0), angle=0.0, team=Team.RED, vehicle_type=VehicleType.TANK)] * 300
     assert compute_caps(many)[3] == 255                  # saturates
 
 
@@ -90,9 +90,9 @@ def test_caps():
 @pytest.mark.parametrize("mut,frag", [
     (lambda m: setattr(m.props[0], "scale", 0.01), "scale"),
     (lambda m: setattr(m.props[0], "floors", 41), "floors"),
-    (lambda m: setattr(m.props[3], "spawn_type", 3), "spawn_type"),
-    (lambda m: setattr(m.props[5], "yaw_deg", 10.0), "rotated"),
-    (lambda m: setattr(m.props[0], "position", (0, 5000, 0)), "outside"),
+    (lambda m: setattr(m.props[3], "vehicle_type", 3), "vehicle_type"),
+    (lambda m: setattr(m.props[5], "angle", 10.0), "rotated"),
+    (lambda m: setattr(m.props[0], "position", Vec3(0, 5000, 0)), "outside"),
     (lambda m: setattr(m.environment, "shadow_distance_units", 5), "shadow"),
 ])
 def test_validation_catches(mut, frag):
@@ -157,10 +157,10 @@ def test_quaternion_floats_roundtrip_exactly():
     from swmap.folder import prop_to_json, prop_from_json
     rng = random.Random(3)
     for _ in range(2000):
-        q = tuple(rng.randint(-32767, 32767) for _ in range(4))
-        p = Prop(KIND_MODEL, (0, 0, 0), model_id=1, quat_s16=q)
+        q = Quaternion(*(rng.randint(-32767, 32767) / 32767.0 for _ in range(4)))
+        p = Prop(Kind.MODEL, Vec3(0, 0, 0), model_id=1, rotation=q)
         back = prop_from_json(json.loads(json.dumps(prop_to_json(p))))
-        assert back.quat_s16 == q
+        assert back.rotation == q
 
 
 def test_yaw_and_position_roundtrip_through_json():
@@ -169,12 +169,12 @@ def test_yaw_and_position_roundtrip_through_json():
     rng = random.Random(4)
     for _ in range(2000):
         raw = rng.randint(0, 65535)
-        p = Prop(KIND_MODEL, tuple(rng.randint(-100000, 100000) / 128.0 for _ in range(3)), model_id=2,
-                 yaw_deg=raw * 45.0 / 8192.0)
+        p = Prop(Kind.MODEL, Vec3(*(rng.randint(-100000, 100000) / 128.0 for _ in range(3))), model_id=2,
+                 angle=raw * 45.0 / 8192.0)
         back = prop_from_json(json.loads(json.dumps(prop_to_json(p))))
         assert back.position == p.position
         # the JSON shows yaw rounded to 4 decimals; what is stored (a 16-bit step) must be unchanged
-        assert int(round(back.yaw_deg * 8192.0 / 45.0)) & 0xFFFF == raw
+        assert int(round(back.angle * 8192.0 / 45.0)) & 0xFFFF == raw
 
 
 def test_timestamp_is_lossless():

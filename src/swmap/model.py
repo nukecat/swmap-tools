@@ -18,11 +18,6 @@ class Team(IntEnum):
     RED = 1
     BLUE = 2
 
-class Collision(IntEnum):
-    DEFAULT = 0
-    ON = 1
-    OFF = 2
-
 class Letter(IntEnum):
     A = 0
     B = 1
@@ -95,14 +90,14 @@ class Prop:
     kind: Kind
     position: Vec3                                 # metres (x, y up, z); resolution 1/128 m
     model_id: Optional[int] = None                 # kind == model
-    yaw_deg: Optional[float] = None                # simple rotation (required for kinds != model)
-    quat_rotation: Optional[Quaternion] = None     # full rotation as floats
+    angle: Optional[float] = None                  # simple rotation (required for kinds != model)
+    rotation: Optional[Quaternion] = None          # full rotation as floats
     scale: Union[None, float, Vec3] = None         # float = uniform (capture point: radius), tuple = x, y, z
     color: Optional[Color] = None
     floors: Optional[int] = None
-    collision: Collision = Collision.DEFAULT
+    collision: Optional[bool] = None
     team: Team = Team.FFA                          # spawn: 0 deathmatch, 1 red, 2 blue
-    spawn_type: VehicleType = VehicleType.TANK     # spawn: 1, 2 or 4
+    vehicle_type: VehicleType = VehicleType.TANK     # spawn: 1, 2 or 4
     reserve: bool = False                          # spawn
     letter: Letter = Letter.A                      # capture point 0..3 = a..d
 

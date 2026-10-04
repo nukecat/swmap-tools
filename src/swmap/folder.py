@@ -8,6 +8,7 @@
   _derived/             read-only helper images, ignored by pack
 """
 from __future__ import annotations
+from dataclasses import astuple
 import json, shutil, uuid
 from pathlib import Path
 
@@ -15,14 +16,12 @@ import numpy as np
 from PIL import Image
 
 from .binio import FormatError
-from .model import (SwMap, Header, Environment, Terrain, Prop, now_ticks, ticks_to_iso, iso_to_ticks, Kind, Team)
+from .model import (Color, Letter, Quaternion, SwMap, Header, Environment, Terrain, Prop, Vec3, VehicleType,
+                    now_ticks, ticks_to_iso, iso_to_ticks, Kind, Team)
 from .preview import render_preview
 from . import terrain as T
 
 FORMAT = "swmap-folder/2"
-VEHICLES = {1: "tank", 2: "boat", 4: "plane"}
-VEHICLE_BY_NAME = {v: k for k, v in VEHICLES.items()}
-
 
 def _f32(x: float) -> float:
     """Shortest decimal that still round-trips to the same float32 (nicer JSON: 0.85, not 0.8500000238)."""
@@ -41,78 +40,98 @@ def _unhex(s: str):
 
 
 # ---------------------------------------------------------------- props <-> json
+_COLLISION_TO_JSON = {True: "on", False: "off"}
+_COLLISION_FROM_JSON = {"default": None, "on": True, "off": False}
+_TEAM_JSON = {Team.FFA: "deathmatch", Team.RED: "red", Team.BLUE: "blue"}     # documented names (enum calls it FFA)
+_TEAM_FROM_JSON = {**{v: k for k, v in _TEAM_JSON.items()}, "ffa": Team.FFA}
+
+
 def _xyz(v) -> dict:
-    return {"x": v[0], "y": v[1], "z": v[2]}
+    return {"x": v.x, "y": v.y, "z": v.z}
 
 
-def _unxyz(d, what) -> tuple:
+def _unxyz(d, what, cls=Vec3):
     try:
-        return (float(d["x"]), float(d["y"]), float(d["z"]))
+        return cls(float(d["x"]), float(d["y"]), float(d["z"]))
     except (TypeError, KeyError):
         raise ValueError(f"{what} must be an object like {{\"x\": 0, \"y\": 0, \"z\": 0}}, got {d!r}") from None
 
 
+def _enum_from_name(cls, value, what):
+    """'red' / 'RED' -> Team.RED; a plain number is accepted too."""
+    try:
+        return cls[value.upper()] if isinstance(value, str) else cls(int(value))
+    except (KeyError, ValueError):
+        names = ", ".join(m.name.lower() for m in cls)
+        raise ValueError(f"unknown {what} {value!r} (expected one of: {names})") from None
+
+
 def prop_to_json(p: Prop) -> dict:
-    d = {"kind": p.kind}
-    if p.kind == KIND_MODEL:
+    d = {"kind": Kind(p.kind).name.lower()}
+    if p.kind == Kind.MODEL:
         d["model_id"] = p.model_id
     d["position"] = _xyz(p.position)                       # metres, y is up (exact: multiples of 1/128)
-    if p.kind == KIND_CAPTURE_POINT:
+    if p.kind == Kind.CAPTURE_POINT:
         pass                                               # capture points cannot be rotated (always 0)
-    elif p.yaw_deg is not None:
-        d["yaw_deg"] = round(p.yaw_deg, 4)                 # stored in steps of 360/65536 deg
+    elif p.angle is not None:
+        d["yaw_deg"] = round(p.angle, 4)                   # stored in steps of 360/65536 deg
     else:
-        # quaternion, stored as signed 16-bit / 32767. The game normalises it on load.
-        d["quaternion"] = {k: round(v / 32767.0, 6) for k, v in zip("xyzw", p.quat_rotation)}
+        # rotation, stored as signed 16-bit / 32767. The game normalises it on load.
+        q = p.rotation
+        d["rotation"] = {k: float(getattr(q, k)) for k in "xyzw"}
     if p.scale is not None:
         if isinstance(p.scale, (int, float)):
-            d["radius" if p.kind == KIND_CAPTURE_POINT else "uniform_scale"] = _f32(p.scale)
+            d["radius" if p.kind == Kind.CAPTURE_POINT else "size"] = _f32(p.scale)
         else:
-            d["scale"] = {k: _f32(v) for k, v in zip("xyz", p.scale)}
-    if p.kind == KIND_MODEL:
-        if p.color is not None: d["color"] = _hex(p.color)
+            d["scale"] = {k: _f32(getattr(p.scale, k)) for k in "xyz"}
+    if p.kind == Kind.MODEL:
+        if p.color is not None: d["color"] = _hex(astuple(p.color))
         if p.floors is not None: d["floors"] = p.floors
-        if p.collision != "default": d["collision"] = p.collision
-    elif p.kind == KIND_SPAWN:
-        d["team"] = TEAMS[p.team] if p.team < 3 else p.team
-        d["vehicle"] = VEHICLES.get(p.spawn_type, p.spawn_type)
+        if p.collision is not None: d["collision"] = _COLLISION_TO_JSON[p.collision]
+    elif p.kind == Kind.SPAWN:
+        d["team"] = _TEAM_JSON[Team(p.team)]
+        d["vehicle"] = VehicleType(p.vehicle_type).name.lower()
         if p.reserve: d["reserve"] = True
-    elif p.kind == KIND_CAPTURE_POINT:
-        d["letter"] = "abcd"[p.letter] if p.letter < 4 else p.letter
+    elif p.kind == Kind.CAPTURE_POINT:
+        d["letter"] = Letter(p.letter).name.lower()
     return d
 
 
 def prop_from_json(d: dict) -> Prop:
-    kind = KIND_BY_NAME[d["kind"]]
+    kind = _enum_from_name(Kind, d["kind"], "kind")
     p = Prop(kind=kind, position=_unxyz(d["position"], "position"))
-    if kind == KIND_MODEL:
+    if kind == Kind.MODEL:
         p.model_id = int(d["model_id"])
-    if "quaternion" in d:
+    if "rotation" in d:
         if "yaw_deg" in d:
-            raise ValueError("use either yaw_deg or quaternion, not both")
-        q = d["quaternion"]
-        p.quat_rotation = tuple(int(round(float(q[k]) * 32767.0)) for k in "xyzw")
+            raise ValueError("use either yaw_deg or rotation, not both")
+        q = d["rotation"]
+        p.rotation = Quaternion(*(float(q[k]) for k in "xyzw"))
     else:
-        p.yaw_deg = float(d.get("yaw_deg", 0.0))
-    if "radius" in d or "uniform_scale" in d:
+        p.angle = float(d.get("yaw_deg", 0.0))
+    if "radius" in d or "size" in d:
         if "scale" in d:
-            raise ValueError("use either uniform_scale/radius or scale, not both")
-        p.scale = float(d.get("radius", d.get("uniform_scale")))
+            raise ValueError("use either size/radius or scale, not both")
+        p.scale = float(d.get("radius", d.get("size")))
     elif "scale" in d:
         p.scale = _unxyz(d["scale"], "scale")
-    if kind == KIND_MODEL:
-        if "color" in d: p.color = _unhex(d["color"])
+    if kind == Kind.MODEL:
+        if "color" in d: p.color = Color(*_unhex(d["color"]))
         if "floors" in d: p.floors = int(d["floors"])
-        p.collision = d.get("collision", "default")
-    elif kind == KIND_SPAWN:
+        c = d.get("collision", "default")
+        if c not in _COLLISION_FROM_JSON:
+            raise ValueError(f"collision must be default, on or off, got {c!r}")
+        p.collision = _COLLISION_FROM_JSON[c]
+    elif kind == Kind.SPAWN:
         t = d.get("team", "deathmatch")
-        p.team = TEAMS.index(t) if isinstance(t, str) else int(t)
-        v = d.get("vehicle", "tank")
-        p.spawn_type = VEHICLE_BY_NAME[v] if isinstance(v, str) else int(v)
+        if isinstance(t, str) and t.lower() in _TEAM_FROM_JSON:
+            p.team = _TEAM_FROM_JSON[t.lower()]
+        else:
+            p.team = _enum_from_name(Team, t, "team")
+        p.vehicle_type = _enum_from_name(VehicleType, d.get("vehicle", "tank"), "vehicle")
         p.reserve = bool(d.get("reserve", False))
-    elif kind == KIND_CAPTURE_POINT:
-        l = d.get("letter", "a")
-        p.letter = "abcd".index(l) if isinstance(l, str) else int(l)
+    elif kind == Kind.CAPTURE_POINT:
+        p.letter = _enum_from_name(Letter, d.get("letter", "a"), "letter")
     return p
 
 
@@ -227,7 +246,7 @@ def read_folder(folder, regenerate_preview=False, touch=False) -> SwMap:
 README = """Unpacked .swmap
 ===============
 map.json            name, author, GUID, size, modified time, environment (distances in metres), paint layer ids
-objects.json        array of props. position {x, y (up), z} in metres; yaw_deg or quaternion; kinds:
+objects.json        array of props. position {x, y (up), z} in metres; yaw_deg or rotation; kinds:
                     model | spawn (team, vehicle: tank/boat/plane) | capture_point (radius, letter) | player_spawn
 terrain/heightmap.png   16-bit grayscale. metres = value * 500 / 65536 - 100   (-100 .. 400 m)
 terrain/paint_NN.png    8-bit grayscale weight of paint layer NN. Layer 00 (the base) is implied:

@@ -10,7 +10,7 @@ def compute_caps(props) -> list:
     c = [0] * 11
     for p in props:
         if p.kind == Kind.SPAWN:
-            i = min(p.team, 2) * 3 + _SLOT.get(p.spawn_type, 0)
+            i = min(p.team, 2) * 3 + _SLOT.get(int(p.vehicle_type), 0)
         elif p.kind == Kind.CAPTURE_POINT:
             i = 9
         elif p.kind == Kind.PLAYER_SPAWN:

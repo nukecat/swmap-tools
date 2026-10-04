@@ -8,7 +8,7 @@ from .binio import FormatError
 from .caps import compute_caps
 from .fileio import load, dumps
 from .folder import read_folder, write_folder
-from .model import SwMap, KIND_NAMES
+from .model import Kind, SwMap
 from .validate import validate
 
 
@@ -61,9 +61,9 @@ def cmd_info(a):
     print(f"  heights   {z.min():.1f} .. {z.max():.1f} m")
     print(f"  env       water={e.water} ice={e.ice} walls={e.edge_walls} fog={e.fog} time={e.time:g} weather={e.weather} "
           f"shadow={e.shadow_distance_m:g} m fog_mode={e.fog_mode} fog={e.fog_distance_m:g} m #{''.join('%02x' % c for c in e.fog_color)}")
-    kinds = collections.Counter(KIND_NAMES[q.kind] for q in m.props)
+    kinds = collections.Counter(Kind(q.kind).name.lower() for q in m.props)
     print(f"  props     {len(m.props)}   " + "  ".join(f"{k}={v}" for k, v in sorted(kinds.items())))
-    models = collections.Counter(q.model_id for q in m.props if q.kind == 0)
+    models = collections.Counter(q.model_id for q in m.props if q.kind == Kind.MODEL)
     if models:
         print("  models    " + "  ".join(f"#{k}x{v}" for k, v in models.most_common(8)) + ("  ..." if len(models) > 8 else ""))
     caps = compute_caps(m.props)

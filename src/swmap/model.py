@@ -110,7 +110,7 @@ class Prop:
     vehicle_type: VehicleType = VehicleType.TANK   # spawn: 1, 2 or 4
     reserve: bool = False                          # spawn
     letter: Letter = Letter.A                      # capture point 0..3 = a..d
-
+    glow: bool = False
 
 @dataclass
 class Header:

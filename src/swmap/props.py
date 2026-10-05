@@ -14,9 +14,10 @@ class Flags(IntFlag):
     FLOORS = 1 << 4
     COLL_ON = 1 << 5
     COLL_OFF = 1 << 6
+    GLOW = 1 << 7
 
 def _check_flags(kind: int, fl: int):
-    allowed = 0x7F if kind == Kind.MODEL else 0x07
+    allowed = 0xFF if kind == Kind.MODEL else 0x07
     if fl & ~allowed:
         raise FormatError(f"flags {fl:#04x} not allowed for kind {kind}")
     if kind != Kind.MODEL and not fl & Flags.YAW:
@@ -70,6 +71,7 @@ def read_props(r: Reader, count: int) -> list:
             if fl & Flags.FLOORS:
                 p.floors = r.u8()
             p.collision = True if fl & Flags.COLL_ON else (False if fl & Flags.COLL_OFF else None)
+            p.glow = True if fl & Flags.GLOW else False
         elif kind == Kind.SPAWN:
             p.team = _enum(Team, r.u8(), "team")
             b = r.u8()
@@ -99,6 +101,7 @@ def write_props(w: Writer, props):
             if p.collision is True: fl |= Flags.COLL_ON
             elif p.collision is False: fl |= Flags.COLL_OFF
             elif p.collision is not None: raise ValueError(f"bad collision {p.collision!r}")
+            if p.glow is True: fl |= Flags.GLOW
         _check_flags(p.kind, fl)
         w.u8(p.kind)
         w.u8(fl)

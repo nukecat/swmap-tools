@@ -100,6 +100,7 @@ def prop_to_json(p: Prop) -> dict:
         if p.color is not None: d["color"] = _hex(astuple(p.color))
         if p.floors is not None: d["floors"] = p.floors
         if p.collision is not None: d["collision"] = p.collision          # true / false; absent = game default
+        if p.glow: d["glow"] = True
     elif p.kind == Kind.SPAWN:
         d["team"] = Team(p.team).name.lower()
         d["vehicle_type"] = VehicleType(p.vehicle_type).name.lower()
@@ -136,6 +137,7 @@ def prop_from_json(d: dict) -> Prop:
         if c is not None and not isinstance(c, bool):
             raise ValueError(f"collision must be true or false (or left out for the default), got {c!r}")
         p.collision = c
+        if "glow" in d: p.glow = bool(d["glow"])
     elif kind == Kind.SPAWN:
         t = d.get("team", "ffa")
         p.team = Team.FFA if isinstance(t, str) and t.lower() == "deathmatch" else _enum_from_name(Team, t, "team")

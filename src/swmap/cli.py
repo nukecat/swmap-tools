@@ -3,6 +3,8 @@ from __future__ import annotations
 import argparse, collections, sys, tempfile
 from pathlib import Path
 
+from swmap.container import read_container
+
 from . import __version__
 from .binio import FormatError
 from .caps import compute_caps
@@ -113,6 +115,16 @@ def cmd_verify(a):
     return 1 if bad else 0
 
 
+def cmd_payload(a):
+    data = read_container(a.file).payload
+    if a.output == "-":
+        sys.stdout.buffer.write(data)
+    else:
+        out = Path(a.output) if a.output else Path(a.file).with_suffix(".payload.bin")
+        out.write_bytes(data)
+        print(f"wrote {len(data):,} bytes -> {out}", file=sys.stderr)
+
+
 def cmd_new(a):
     m = SwMap.new(a.name, a.author, a.size, a.height_points, a.paint_resolution, a.floor)
     write_folder(m, a.folder, force=a.force)
@@ -147,6 +159,10 @@ def main(argv=None) -> int:
 
     s = sub.add_parser("verify", help="check that unpack->pack reproduces the file byte for byte")
     s.add_argument("files", nargs="+"); s.set_defaults(fn=cmd_verify)
+
+    s = sub.add_parser("payload", help="dump the inflated payload as binary (any container version)")
+    s.add_argument("file"); s.add_argument("-o", "--output", help="output file, or - for stdout (default: <file>.payload.bin)")
+    s.set_defaults(fn=cmd_payload)
 
     s = sub.add_parser("new", help="create a flat empty map folder to start from")
     s.add_argument("folder"); s.add_argument("--name", default="New map"); s.add_argument("--author", default="")

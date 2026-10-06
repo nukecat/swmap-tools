@@ -1,6 +1,8 @@
 """High level load / save."""
 from __future__ import annotations
 from pathlib import Path
+
+from swmap.binio import FormatError
 from .container import compress, read_container, write_container
 from .payload import decode_payload, encode_payload
 from .model import SwMap
@@ -22,6 +24,8 @@ def _detect_level(data: bytes, payload: bytes) -> int:
 
 def loads(data: bytes) -> SwMap:
     c = read_container(data)
+    if c.header.version != 1:
+        raise FormatError(f"unsupported version {c.header.version}")
     env, terr, props = decode_payload(c.payload)
     m = SwMap(c.header, env, terr, props, c.preview_jpg)
     # remembered so that dumps() reproduces the file exactly (not part of the model classes)

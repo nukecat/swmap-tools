@@ -21,8 +21,6 @@ def read_container(data: bytes) -> Container:
     if r.take(4) != MAGIC:
         raise FormatError("not a .swmap file (bad magic)")
     version = r.u16()
-    if version != 1:
-        raise FormatError(f"unsupported container version {version}")
     guid = uuid.UUID(bytes_le=r.take(16))
     name = r.string()
     author = r.string()

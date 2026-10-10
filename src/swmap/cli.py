@@ -55,7 +55,7 @@ def cmd_info(a):
     m = _load_any(p)
     h, e, t = m.header, m.environment, m.terrain
     print(f"{p.name}")
-    print(f"  name      {h.name!r}   author {h.author!r}")
+    print(f"  name      {h.name!r}   author {h.author!r}   container v{getattr(m, 'source_version', h.version)}" + (" (saved as v2)" if getattr(m, "source_version", 2) != 2 else ""))
     print(f"  guid      {h.guid}   modified {h.modified_utc:%Y-%m-%d %H:%M:%S} UTC")
     print(f"  size      {h.size_m:g} m   heightmap {t.height_points}x{t.height_points}   paint {t.paint_resolution}x{t.paint_resolution}   layers {t.layer_ids}")
     from .terrain import height_to_m
@@ -98,13 +98,15 @@ def cmd_verify(a):
         raw = Path(f).read_bytes()
         try:
             m = load(f)
-            ok1 = dumps(m) == raw
+            v1 = getattr(m, "source_version", 2) != 2          # v1 files are upgraded to v2, so compare with the v2 form
+            ref = dumps(m) if v1 else raw
+            ok1 = dumps(m) == ref
             with tempfile.TemporaryDirectory() as td:
                 write_folder(m, td, force=True)
                 m2 = read_folder(td)
                 data2 = dumps(m2)
-            ok2 = data2 == raw
-            status = "identical" if ok1 and ok2 else ("memory ok, folder differs" if ok1 else "DIFFERS")
+            ok2 = data2 == ref
+            status = ("identical (v1 -> v2)" if v1 else "identical") if ok1 and ok2 else ("memory ok, folder differs" if ok1 else "DIFFERS")
             if not (ok1 and ok2):
                 bad += 1
                 status += f" ({_first_diff(raw, data2 if ok1 else dumps(m))})"
@@ -116,7 +118,7 @@ def cmd_verify(a):
 
 
 def cmd_payload(a):
-    data = read_container(a.file).payload
+    data = read_container(Path(a.file).read_bytes()).payload
     if a.output == "-":
         sys.stdout.buffer.write(data)
     else:

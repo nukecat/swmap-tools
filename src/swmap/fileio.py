@@ -4,6 +4,7 @@ from pathlib import Path
 
 from swmap.binio import FormatError
 from .container import compress, read_container, write_container
+from .props import READ_VERSIONS, WRITE_VERSION
 from .payload import decode_payload, encode_payload
 from .model import SwMap
 from .caps import compute_caps
@@ -24,10 +25,13 @@ def _detect_level(data: bytes, payload: bytes) -> int:
 
 def loads(data: bytes) -> SwMap:
     c = read_container(data)
-    if c.header.version != 1:
-        raise FormatError(f"unsupported version {c.header.version}")
-    env, terr, props = decode_payload(c.payload)
+    version = c.header.version
+    if version not in READ_VERSIONS:
+        raise FormatError(f"unsupported version {version}")
+    env, terr, props = decode_payload(c.payload, version)
     m = SwMap(c.header, env, terr, props, c.preview_jpg)
+    m.source_version = version                    # older maps are read and saved as the current version
+    c.header.version = WRITE_VERSION
     # remembered so that dumps() reproduces the file exactly (not part of the model classes)
     m.deflate_level = _detect_level(data, c.payload)
     m.loaded_from_file = True

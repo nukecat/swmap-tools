@@ -82,6 +82,7 @@ class Color:
     r: int
     g: int
     b: int
+    a: int = 0xFF
 
 @dataclass
 class Vec3:
@@ -119,7 +120,7 @@ class Header:
     author: str = ""
     modified_ticks: int = 0
     size_m: float = 1024.0
-    version: int = 1
+    version: int = 2
 
     @property
     def modified_utc(self):

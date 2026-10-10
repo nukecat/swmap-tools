@@ -118,7 +118,11 @@ def test_reader_rejects_garbage():
 def test_real_sample_byte_identical(path, tmp_path):
     raw = open(path, "rb").read()
     m = swmap.load(path)
-    assert swmap.dumps(m) == raw
+    if m.source_version == 2:
+        assert swmap.dumps(m) == raw
+    else:                                   # v1 files are saved as v2: must be stable from then on
+        raw = swmap.dumps(m)
+        assert swmap.loads(raw).props == m.props
     write_folder(m, tmp_path / "f")
     assert swmap.dumps(read_folder(tmp_path / "f")) == raw
     assert not [i for i in swmap.validate(m) if i.level == "error"]
@@ -256,3 +260,72 @@ def test_pngs_are_top_down_with_plus_z_at_the_top(tmp_path):
     assert (paint[-1, :] == 200).all() and not paint[0].any()
     m2 = read_folder(tmp_path / "f")
     assert (m2.terrain.heights == m.terrain.heights).all() and (m2.terrain.layers[0] == m.terrain.layers[0]).all()
+
+
+# ---------------------------------------------------------------- container version 2 (RGBA colour; v1 read-only)
+def _color_map(color):
+    m = swmap.SwMap.new("T", "a", 512, 129, 128)
+    m.props = [Prop(Kind.MODEL, Vec3(1, 2, 3), model_id=1, rotation=0.0, color=color),
+               Prop(Kind.MODEL, Vec3(3, 2, 3), model_id=1, rotation=0.0)]
+    return m
+
+
+def _as_v1(data: bytes) -> bytes:
+    """Rewrite a freshly written v2 map as a v1 file (3-byte colours) to test reading the old format."""
+    import zlib
+    from swmap.container import read_container, compress
+    from swmap.model import Environment
+    c = read_container(data)
+    pl = c.payload
+    # the coloured prop is the first one; its colour sits right after the prop header - find it by the known bytes
+    needle = bytes([10, 20, 30, 40])
+    i = pl.index(needle)
+    pl = pl[:i] + bytes([10, 20, 30]) + pl[i + 4:]
+    comp = compress(pl)
+    head = data[: len(data) - len(compress(c.payload)) - 4]
+    out = bytearray(head + len(comp).to_bytes(4, "little") + comp)
+    out[4:6] = b"\x01\x00"
+    return bytes(out)
+
+
+def test_written_files_are_v2_with_alpha_and_roundtrip():
+    m = _color_map(Color(10, 20, 30, 40))
+    data = swmap.dumps(m)
+    assert data[4:6] == b"\x02\x00"
+    back = swmap.loads(data)
+    assert back.source_version == 2 and back.props[0].color == Color(10, 20, 30, 40) and back.props[1].color is None
+    assert swmap.dumps(back) == data
+
+
+def test_v1_is_read_with_opaque_colour_and_saved_as_v2():
+    v1 = _as_v1(swmap.dumps(_color_map(Color(10, 20, 30, 40))))
+    assert v1[4:6] == b"\x01\x00"
+    m = swmap.loads(v1)
+    assert m.source_version == 1 and m.header.version == 2
+    assert m.props[0].color == Color(10, 20, 30, 255)
+    assert swmap.dumps(m)[4:6] == b"\x02\x00"
+
+
+def test_unknown_container_version_rejected():
+    data = bytearray(swmap.dumps(_color_map(Color(1, 2, 3, 4))))
+    data[4:6] = b"\x03\x00"
+    with pytest.raises(FormatError):
+        swmap.loads(bytes(data))
+
+
+def test_folder_roundtrip_and_hex_forms(tmp_path):
+    import json
+    from swmap.folder import prop_from_json
+    m = _color_map(Color(255, 136, 0, 64))
+    m.props.append(Prop(Kind.MODEL, Vec3(0, 0, 0), model_id=2, rotation=0.0, color=Color(255, 136, 0)))
+    data = swmap.dumps(m)
+    write_folder(m, tmp_path / "f")
+    assert "container_version" not in json.loads((tmp_path / "f" / "map.json").read_text())
+    objs = json.loads((tmp_path / "f" / "objects.json").read_text())
+    assert objs[0]["color"] == "#ff880040" and objs[2]["color"] == "#ff8800"      # alpha only shown when not opaque
+    assert swmap.dumps(read_folder(tmp_path / "f")) == data
+    base = {"kind": "model", "model_id": 1, "position": {"x": 0, "y": 0, "z": 0}}
+    assert prop_from_json({**base, "color": "#11223344"}).color == Color(0x11, 0x22, 0x33, 0x44)
+    assert prop_from_json({**base, "color": "#112233"}).color == Color(0x11, 0x22, 0x33, 0xFF)
+    with pytest.raises(ValueError):
+        prop_from_json({**base, "color": "#1122"})

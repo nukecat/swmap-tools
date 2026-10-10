@@ -32,11 +32,21 @@ def _hex(c) -> str:
     return "#%02x%02x%02x" % tuple(c)
 
 
-def _unhex(s: str):
-    s = s.lstrip("#")
-    if len(s) != 6:
-        raise ValueError(f"bad colour {s!r}")
-    return tuple(int(s[i:i + 2], 16) for i in (0, 2, 4))
+def _unhex(s: str, alpha: bool = False):
+    """'#rrggbb' -> (r, g, b). With alpha=True also '#rrggbbaa' -> (r, g, b, a); '#rrggbb' then means opaque."""
+    s = str(s).lstrip("#")
+    if len(s) not in ((6, 8) if alpha else (6,)):
+        raise ValueError(f"bad colour {s!r} (expected {'#rrggbb or #rrggbbaa' if alpha else '#rrggbb'})")
+    try:
+        v = tuple(int(s[i:i + 2], 16) for i in range(0, len(s), 2))
+    except ValueError:
+        raise ValueError(f"bad colour {s!r}") from None
+    return v + (0xFF,) if alpha and len(v) == 3 else v
+
+
+def _hex_rgba(c) -> str:
+    """Prop colour: '#rrggbb' when opaque, '#rrggbbaa' otherwise (both read back identically)."""
+    return _hex(c[:3]) if c[3] == 0xFF else "#%02x%02x%02x%02x" % tuple(c)
 
 
 # ---------------------------------------------------------------- props <-> json
@@ -97,7 +107,7 @@ def prop_to_json(p: Prop) -> dict:
         else:
             d["scale"] = {k: _f32(getattr(p.scale, k)) for k in "xyz"}
     if p.kind == Kind.MODEL:
-        if p.color is not None: d["color"] = _hex(astuple(p.color))
+        if p.color is not None: d["color"] = _hex_rgba(astuple(p.color))
         if p.floors is not None: d["floors"] = p.floors
         if p.collision is not None: d["collision"] = p.collision          # true / false; absent = game default
         if p.glow: d["glow"] = True
@@ -131,7 +141,7 @@ def prop_from_json(d: dict) -> Prop:
     elif "scale" in d:
         p.scale = _unxyz(d["scale"], "scale")
     if kind == Kind.MODEL:
-        if "color" in d: p.color = Color(*_unhex(d["color"]))
+        if "color" in d: p.color = Color(*_unhex(d["color"], alpha=True))
         if "floors" in d: p.floors = int(d["floors"])
         c = d.get("collision")
         if c is not None and not isinstance(c, bool):
@@ -193,8 +203,6 @@ def write_folder(m: SwMap, folder, force=False, derived=True):
         },
         "paint_layer_ids": t.layer_ids,
     }
-    if h.version != 1:
-        meta["container_version"] = h.version
     level = getattr(m, "deflate_level", None)
     if level not in (None, 6):                         # the game has also written level 9; keeps pack byte-identical
         meta["deflate_level"] = level
@@ -232,7 +240,7 @@ def read_folder(folder, regenerate_preview=False, touch=False) -> SwMap:
         raise FormatError(f"unsupported folder format {meta.get('format')!r}")
     ev = meta["environment"]
     header = Header(uuid.UUID(meta["guid"]), meta["name"], meta.get("author", ""), iso_to_ticks(meta["modified"]),
-                    float(meta["size_m"]), int(meta.get("container_version", 1)))
+                    float(meta["size_m"]))
     if touch:
         header.modified_ticks = now_ticks()
     env = Environment(

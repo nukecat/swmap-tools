@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 from .binio import Reader, Writer, FormatError
 from .model import Environment, FogMode, Terrain, Weather
-from .props import read_props, write_props
+from .props import READ_VERSIONS, read_props, write_props
 from . import terrain as T
 
 
@@ -15,7 +15,9 @@ def _enum_or_int(cls, v: int):
         return v
 
 
-def decode_payload(data: bytes):
+def decode_payload(data: bytes, version: int):
+    if version not in READ_VERSIONS:
+        raise FormatError(f"unsupported version {version}")
     r = Reader(data)
     fl = r.u8()
     if fl & 0xF0:
@@ -41,7 +43,7 @@ def decode_payload(data: bytes):
         terr.paint_resolution = res
 
     count = r.varuint()
-    props = read_props(r, count)
+    props = read_props(r, count, version)
     if r.remaining:
         raise FormatError(f"{r.remaining} unexpected trailing bytes in payload")
     return env, terr, props

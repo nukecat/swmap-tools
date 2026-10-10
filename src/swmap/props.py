@@ -16,6 +16,10 @@ class Flags(IntFlag):
     COLL_OFF = 1 << 6
     GLOW = 1 << 7
 
+READ_VERSIONS = (1, 2)          # v1: colour = RGB (3 bytes); v2: colour = RGBA (4 bytes)
+WRITE_VERSION = 2               # only the current format is written
+
+
 def _check_flags(kind: int, fl: int):
     allowed = 0xFF if kind == Kind.MODEL else 0x07
     if fl & ~allowed:
@@ -35,11 +39,13 @@ def _enum(cls, value: int, what: str):
     except ValueError:
         raise FormatError(f"invalid {what} {value}") from None
 
-def read_props(r: Reader, count: int) -> list:
+def read_props(r: Reader, count: int, version: int) -> list:
+    if version not in READ_VERSIONS:
+        raise FormatError(f"unsupported version {version}")
     props = []
     for _ in range(count):
         kind = r.u8()
-        if kind > 3:
+        if kind not in Kind:
             raise FormatError(f"unknown prop kind {kind}")
         fl = r.u8()
         _check_flags(kind, fl)
@@ -67,7 +73,10 @@ def read_props(r: Reader, count: int) -> list:
             p.scale = Vec3(x=r.f32(), y=r.f32(), z=r.f32())
         if kind == Kind.MODEL:
             if fl & Flags.COLOR:
-                p.color = Color(r=r.u8(), g=r.u8(), b=r.u8())
+                if version == 1:
+                    p.color = Color(r=r.u8(), g=r.u8(), b=r.u8())           # alpha implied opaque
+                else:
+                    p.color = Color(r=r.u8(), g=r.u8(), b=r.u8(), a=r.u8())
             if fl & Flags.FLOORS:
                 p.floors = r.u8()
             p.collision = True if fl & Flags.COLL_ON else (False if fl & Flags.COLL_OFF else None)
@@ -121,7 +130,7 @@ def write_props(w: Writer, props):
                 w.f32(float(v))
         if p.kind == Kind.MODEL:
             if fl & Flags.COLOR:
-                for v in astuple(p.color): w.u8(v)
+                for v in astuple(p.color): w.u8(v)       # r, g, b, a
             if fl & Flags.FLOORS:
                 w.u8(p.floors)
         elif p.kind == Kind.SPAWN:

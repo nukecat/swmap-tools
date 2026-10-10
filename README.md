@@ -3,7 +3,7 @@
 Library + command line for **.swmap** custom maps: unpack a map into a folder of ordinary files
 (PNG heightmap, PNG paint layers, JSON objects/settings), edit them, and pack them back.
 
-Round trips are **byte-identical** on every map I could test (unpack -> pack gives the original file; version 1 maps are upgraded to version 2 instead),
+Round trips are **byte-identical** on every map that are tested (unpack -> pack gives the original file; version 1 maps are upgraded to version 2 instead),
 and `pack` refuses things the game's loader would reject.
 
 ```

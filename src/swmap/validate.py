@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from dataclasses import astuple
+from .props import version_for
 from .model import Color, FogMode, Kind, Letter, Quaternion, SwMap, Team, Vec3, VehicleType, Weather
 
 
@@ -24,6 +25,11 @@ def validate(m: SwMap) -> list:
     E = lambda w, msg: out.append(Issue("error", w, msg))
     W = lambda w, msg: out.append(Issue("warning", w, msg))
     env, t = m.environment, m.terrain
+
+    stored = getattr(m, "source_version", None)
+    if stored is not None and stored != version_for(m.props):
+        E("map", f"stored container version is {stored} but this map needs {version_for(m.props)} - the game rejects "
+                 f"such a file (version 2 only if a model colour has alpha < 255); packing it again fixes this")
 
     if not 128 <= m.header.size_m <= 8000:
         W("map", f"size {m.header.size_m} m is outside the game's 128..8000 m range")

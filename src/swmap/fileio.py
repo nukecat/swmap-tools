@@ -4,7 +4,7 @@ from pathlib import Path
 
 from swmap.binio import FormatError
 from .container import compress, read_container, write_container
-from .props import READ_VERSIONS, WRITE_VERSION
+from .props import READ_VERSIONS, version_for
 from .payload import decode_payload, encode_payload
 from .model import SwMap
 from .caps import compute_caps
@@ -30,8 +30,7 @@ def loads(data: bytes) -> SwMap:
         raise FormatError(f"unsupported version {version}")
     env, terr, props = decode_payload(c.payload, version)
     m = SwMap(c.header, env, terr, props, c.preview_jpg)
-    m.source_version = version                    # older maps are read and saved as the current version
-    c.header.version = WRITE_VERSION
+    m.source_version = version                    # as stored; dumps() always writes version_for(props)
     # remembered so that dumps() reproduces the file exactly (not part of the model classes)
     m.deflate_level = _detect_level(data, c.payload)
     m.loaded_from_file = True
@@ -51,8 +50,9 @@ def dumps(m: SwMap, level: int | None = None) -> bytes:
     if not m.preview_jpg and not getattr(m, "loaded_from_file", False):
         from .preview import render_preview
         m.preview_jpg = render_preview(m.terrain, m.header.size_m)
+    version = version_for(m.props)        # the game rejects any other version than this one
     return write_container(m.header, compute_caps(m.props), m.preview_jpg,
-                           encode_payload(m.environment, m.terrain, m.props), level)
+                           encode_payload(m.environment, m.terrain, m.props, version), level, version)
 
 
 def save(m: SwMap, path, level: int | None = None):

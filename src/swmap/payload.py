@@ -49,7 +49,7 @@ def decode_payload(data: bytes, version: int):
     return env, terr, props
 
 
-def encode_payload(env: Environment, terr: Terrain, props) -> bytes:
+def encode_payload(env: Environment, terr: Terrain, props, version: int | None = None) -> bytes:
     w = Writer()
     w.u8(int(env.water) | int(env.ice) << 1 | int(env.edge_walls) << 2 | int(env.fog) << 3)
     w.f32(env.time)
@@ -80,5 +80,5 @@ def encode_payload(env: Environment, terr: Terrain, props) -> bytes:
         w.raw(T.encode_splat(layer))
 
     w.varuint(len(props))
-    write_props(w, props)
+    write_props(w, props, version)
     return w.getvalue()

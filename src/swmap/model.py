@@ -120,7 +120,7 @@ class Header:
     author: str = ""
     modified_ticks: int = 0
     size_m: float = 1024.0
-    version: int = 2
+    version: int = 1            # as read from a file; dumps() always writes props.version_for(props)
 
     @property
     def modified_utc(self):

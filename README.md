@@ -3,7 +3,7 @@
 Library + command line for **.swmap** custom maps: unpack a map into a folder of ordinary files
 (PNG heightmap, PNG paint layers, JSON objects/settings), edit them, and pack them back.
 
-Round trips are **byte-identical** on every map that are tested (unpack -> pack gives the original file; version 1 maps are upgraded to version 2 instead),
+Round trips are **byte-identical** on every map I could test (unpack -> pack gives the original file, for container version 1 and 2),
 and `pack` refuses things the game's loader would reject.
 
 ```
@@ -54,9 +54,11 @@ Fixed-size data are objects; positions are metres (x, z horizontal, y up, 1/128 
 ```
 (comments are for this README only; JSON has none.)
 
-**Colours** are `#rrggbb` (opaque) or `#rrggbbaa`; a map is written with `#rrggbbaa` only when alpha is not 255.
-`pack` always writes container **version 2** (RGBA, 4 bytes). Version 1 maps can still be read (their colours load with alpha 255)
-and are saved as version 2, so unpack -> pack of a v1 file upgrades it instead of reproducing it byte for byte.
+**Colours** are `#rrggbb` (opaque) or `#rrggbbaa`; `#rrggbbaa` is written only when alpha is not 255.
+The container version is never stored in the folder: `pack` picks it the way the game does - version 2 if any model colour
+has alpha < 255, otherwise version 1 (the game rejects a file whose version doesn't match). Removing the last translucent colour
+therefore turns the file back into version 1 by itself. A file stored with the wrong version still unpacks;
+`validate` reports it and `pack` writes it correctly.
 
 A numeric `rotation` is a yaw in degrees, stored in steps of 360/65536.
 A quaternion (models only) is stored as signed 16-bit integers divided by 32767 and normalised by the game when it loads the map;

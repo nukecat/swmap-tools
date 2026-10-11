@@ -6,7 +6,6 @@ from .binio import Reader, Writer, FormatError
 from .model import Header
 
 MAGIC = b"SWMP"
-VERSION = 2                # written version (1 can still be read; its colours have no alpha)
 
 
 @dataclass
@@ -45,10 +44,10 @@ def compress(payload: bytes, level: int = 6) -> bytes:
     return c.compress(payload) + c.flush()
 
 
-def write_container(header: Header, caps, preview_jpg: bytes, payload: bytes, level: int = 6) -> bytes:
+def write_container(header: Header, caps, preview_jpg: bytes, payload: bytes, level: int = 6, version: int = 1) -> bytes:
     w = Writer()
     w.raw(MAGIC)
-    w.u16(VERSION)
+    w.u16(version)
     w.raw(header.guid.bytes_le)
     w.string(header.name)
     w.string(header.author)

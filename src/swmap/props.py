@@ -17,7 +17,17 @@ class Flags(IntFlag):
     GLOW = 1 << 7
 
 READ_VERSIONS = (1, 2)          # v1: colour = RGB (3 bytes); v2: colour = RGBA (4 bytes)
-WRITE_VERSION = 2               # only the current format is written
+
+
+def version_for(props) -> int:
+    """CustomMapSerializer.VersionFor: 2 if any model prop has a colour with alpha < 255, else 1.
+    The game's reader compares the file's version with this value and REJECTS the map on any mismatch,
+    so the version is derived from the props and can never be chosen freely."""
+    for p in props:
+        if p.kind == Kind.MODEL and p.color is not None and p.color.a < 0xFF:
+            return 2
+    return 1
+
 
 
 def _check_flags(kind: int, fl: int):
@@ -91,7 +101,9 @@ def read_props(r: Reader, count: int, version: int) -> list:
     return props
 
 
-def write_props(w: Writer, props):
+def write_props(w: Writer, props, version: int | None = None):
+    if version is None:
+        version = version_for(props)
     for p in props:
         fl = 0
         if isinstance(p.rotation, (int, float)):
@@ -130,7 +142,8 @@ def write_props(w: Writer, props):
                 w.f32(float(v))
         if p.kind == Kind.MODEL:
             if fl & Flags.COLOR:
-                for v in astuple(p.color): w.u8(v)       # r, g, b, a
+                c = p.color                              # v1: r g b; v2: r g b a
+                for v in ((c.r, c.g, c.b, c.a) if version >= 2 else (c.r, c.g, c.b)): w.u8(v)
             if fl & Flags.FLOORS:
                 w.u8(p.floors)
         elif p.kind == Kind.SPAWN:

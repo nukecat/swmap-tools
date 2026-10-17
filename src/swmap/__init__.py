@@ -1,12 +1,14 @@
-"""swmap - read, write, unpack and pack .swmap custom map files."""
-from .fileio import load, loads, save, dumps
-from .model import (SwMap, Header, Environment, Terrain, Prop, Kind, Team, Letter, VehicleType,
-                    Vec3, Quaternion, Color, Weather, FogMode)
-from .folder import read_folder, write_folder
-from .validate import validate
-from .binio import FormatError
+"""swmap - unpack .swmap custom maps into editable files and pack them back.
 
-__version__ = "0.1.0"
-__all__ = ["load", "loads", "save", "dumps", "SwMap", "Header", "Environment", "Terrain", "Prop",
-           "Kind", "Team", "Letter", "VehicleType", "Vec3", "Quaternion", "Color", "Weather", "FogMode",
-           "read_folder", "write_folder", "validate", "FormatError"]
+The binary format (reading, writing, validation rules) lives in swformats
+(https://github.com/xmake-studio/sw-formats); the map model is ``swformats.swmap.SwMap``.
+"""
+from swformats import FormatError
+from swformats.swmap import SwMap
+
+from .fileio import MapFile, load, loads
+from .folder import read_folder, write_folder
+from .validate import Issue, validate
+
+__version__ = "0.4.0"
+__all__ = ["load", "loads", "MapFile", "SwMap", "read_folder", "write_folder", "validate", "Issue", "FormatError"]

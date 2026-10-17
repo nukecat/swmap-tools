@@ -4,10 +4,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "swmap-tools"
-version = "0.3.0"
+version = "0.4.0"
 description = "Read, write, unpack and pack .swmap custom map files"
 requires-python = ">=3.9"
-dependencies = ["numpy", "pillow"]
+dependencies = [
+    "swformats @ git+https://github.com/xmake-studio/sw-formats.git#subdirectory=python",
+    "numpy",
+    "pillow",
+]
 
 [project.scripts]
 swmap = "swmap.cli:main"

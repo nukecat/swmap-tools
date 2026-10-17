@@ -1,347 +1,364 @@
-"""Run:  pytest -q        (set SWMAP_SAMPLES=/path/to/real/maps to also run the byte-identical sample tests)"""
-import glob, os, random
+"""Run:  pytest -q        (set SWMAP_SAMPLES=/path/to/real/maps to also run the sample-file tests)
+
+The binary format has its own tests in swformats; these cover the folder layout, the JSON mapping and the CLI glue.
+"""
+import glob, json, os, random
 
 import numpy as np
 import pytest
+from PIL import Image
+from swformats import FormatError, MapCatalog, swmap as sw
 
 import swmap
 from swmap import terrain as T
-from swmap.binio import FormatError, Reader, Writer
-from swmap.caps import compute_caps
-from swmap.folder import read_folder, write_folder
-from swmap.model import Color, Letter, Prop, Kind, Quaternion, Team, Vec3, VehicleType
+from swmap.cli import main
+from swmap.fileio import MapFile, deflated_body, inflated_body
+from swmap.folder import (iso_to_ticks, obj_from_json, obj_to_json, read_folder, ticks_to_iso, write_folder)
+from swmap.preview import render_preview
 
 SAMPLES = sorted(glob.glob(os.path.join(os.environ.get("SWMAP_SAMPLES", "/nonexistent"), "*.swmap")))
 
 
-# ---------------------------------------------------------------- codecs
-def test_varints_roundtrip():
-    w = Writer()
-    vals = [0, 1, 127, 128, 16383, 16384, 2 ** 31 - 1, 2 ** 32 - 1]
-    for v in vals: w.varuint(v)
-    sv = [0, -1, 1, -64, 64, -(2 ** 30), 2 ** 30]
-    for v in sv: w.varint(v)
-    w.string("Привіт ‹color›")
-    r = Reader(w.getvalue())
-    assert [r.varuint() for _ in vals] == vals
-    assert [r.varint() for _ in sv] == sv
-    assert r.string() == "Привіт ‹color›" and r.remaining == 0
+def new_map(size=512, **kw):
+    m = sw.SwMap(name="T", author="a", terrain=sw.Terrain.flat(size, height_res=129, alpha_res=128, **kw))
+    m.modified_ticks = 639000000000000000
+    return m
 
 
-@pytest.mark.parametrize("seed", range(3))
-def test_height_codec_is_lossless(seed):
-    rng = np.random.default_rng(seed)
-    n = 65
-    h = rng.integers(0, 65536, (n, n)).astype(np.uint16)          # worst case: white noise incl. big jumps
-    h[10:20, 10:20] = 0; h[30:40, 5:9] = 65535
-    lo, hi = T.encode_heights(h)
-    assert (T.decode_heights(lo, hi, n) == h).all()
+IDS = sorted(MapCatalog.default().props)[:4]          # prop ids the game knows (validate warns about others)
 
 
-def test_splat_codec_is_lossless():
-    rng = np.random.default_rng(1)
-    l = rng.integers(0, 256, (64, 64)).astype(np.uint8)
-    assert (T.decode_splat(T.encode_splat(l), 64) == l).all()
-
-
-def test_known_heights():
-    # game constants: 2 m default floor, bump hill 50 m
-    assert int(T.m_to_height(2.0)) in (13368, 13369)
-    assert abs(float(T.height_to_m(T.m_to_height(50.0))) - 50.0) < 0.01
-
-
-# ---------------------------------------------------------------- props
 def all_kinds():
-    return [
-        Prop(Kind.MODEL, Vec3(-4.0, 2.078125, -13.4765625), model_id=1, rotation=0x907A * 45.0 / 8192.0),   # the palm tree: stored yaw is quantised to 360/65536 degrees
-        Prop(Kind.MODEL, Vec3(1.5, 2.0, 3.0), model_id=300, rotation=Quaternion(0, 23170 / 32767, 0, 23170 / 32767), scale=Vec3(1.0, 2.0, 3.0),
-             color=Color(1, 2, 3), floors=40, collision=True),
-        Prop(Kind.MODEL, Vec3(0.0, 0.0, 0.0), model_id=0, rotation=0.0, scale=2.5, collision=False),
-        Prop(Kind.SPAWN, Vec3(5.0, 3.0, 5.0), rotation=45.0, team=Team.BLUE, vehicle_type=VehicleType.PLANE, reserve=True),
-        Prop(Kind.SPAWN, Vec3(6.0, 3.0, 5.0), rotation=45.0, team=Team.FFA, vehicle_type=VehicleType.BOAT),
-        Prop(Kind.CAPTURE_POINT, Vec3(7.0, 3.0, 5.0), rotation=0.0, scale=30.0, letter=Letter.A),
-        Prop(Kind.PLAYER_SPAWN, Vec3(0.0, 3.5, 0.0), rotation=0.0),
-    ]
+    O = sw.MapObject
+    tilt = O(sw.PROP, prop_id=IDS[1], position=(3.0, 4.0, 6.0), rotation=(0.0, 23170 / 32767, 0.0, 23170 / 32767),
+             scale=(1.0, 2.0, 3.0), color=(1, 2, 3, 255), floors=40, collision=sw.COLLISION_ON)
+    tilt2 = O(sw.PROP, prop_id=IDS[2], position=(1.0, 2.0, 3.0), rotation=(0.1305263489484787, 0.0, 0.0, 0.9914448857307434))
+    palm = O(sw.PROP, prop_id=IDS[0], position=(-8.0, 4.15625, -26.953125))
+    palm.yaw = 0x907A / 65536 * 360
+    objs = [palm, tilt, tilt2,
+            O(sw.PROP, prop_id=IDS[3], scale=(2.5, 2.5, 2.5), collision=sw.COLLISION_OFF, glow=True),
+            O(sw.SPAWN, position=(10.0, 6.0, 10.0), team=sw.TEAM_BLUE, spawn_type=sw.SPAWN_AIRCRAFT, reserve=True),
+            O(sw.SPAWN, position=(12.0, 6.0, 10.0), team=sw.TEAM_DEATHMATCH, spawn_type=sw.SPAWN_WATER),
+            O(sw.CAPTURE_POINT, position=(14.0, 6.0, 10.0), scale=(30.0, 30.0, 30.0), letter=0),
+            O(sw.PLAYER_SPAWN, position=(0.0, 7.0, 0.0))]
+    objs[4].yaw = 45.0
+    return objs
 
 
+# ---------------------------------------------------------------- heights
+def test_height_conversion_matches_swformats():
+    for m in (-100.0, 0.0, 2.0, 50.0, 400.0):
+        assert int(T.m_to_height(m)) == sw.units_to_sample(m * 2)
+    assert abs(float(T.height_to_m(T.m_to_height(50.0))) - 50.0) < 0.01
+    assert float(T.height_to_m(0)) == -100.0 and float(T.height_to_m(65535)) == 400.0
+
+
+# ---------------------------------------------------------------- full map
 def test_full_map_roundtrip_in_memory_and_folder(tmp_path):
-    m = swmap.SwMap.new("T", "a", 512, 129, 128)
-    m.props = all_kinds()
-    m.terrain.heights[40:60, 40:60] = 30000
-    m.terrain.layers[0][10:20, 10:20] = 200
-    data = swmap.dumps(m)
-    m2 = swmap.loads(data)
-    assert swmap.dumps(m2) == data
-    assert m2.props == m.props
-    write_folder(m2, tmp_path / "f")
-    m3 = read_folder(tmp_path / "f")
-    assert swmap.dumps(m3) == data
-    assert not [i for i in swmap.validate(m3) if i.level == "error"]
+    m = new_map()
+    m.objects = all_kinds()
+    m.terrain.heights[40 * 129 + 40] = 30000
+    m.terrain.splat[(10 * 128 + 10) * 4:(10 * 128 + 10) * 4 + 4] = bytes([55, 200, 0, 0])
+    data = sw.write(m)
+    mf = swmap.loads(data)
+    assert mf.dumps() == data
+    write_folder(mf, tmp_path / "f")
+    back = read_folder(tmp_path / "f")
+    assert back.dumps() == data
+    assert not [i for i in swmap.validate(back.map) if i.level == "error"]
 
 
-def test_caps():
-    caps = compute_caps(all_kinds())
-    assert caps == [0, 1, 0, 0, 0, 0, 0, 0, 1, 1, 1]     # ffa boat; blue plane; 1 capture point; 1 player spawn
-    many = [Prop(Kind.SPAWN, Vec3(0, 0, 0), rotation=0.0, team=Team.RED, vehicle_type=VehicleType.TANK)] * 300
-    assert compute_caps(many)[3] == 255                  # saturates
+def test_folder_preserves_every_object_field(tmp_path):
+    m = new_map()
+    m.objects = all_kinds()
+    mf = swmap.loads(sw.write(m))                       # as stored: quantised like a real file
+    write_folder(mf, tmp_path / "f")
+    back = read_folder(tmp_path / "f").map
+    assert len(back.objects) == len(mf.map.objects)
+    for a, b in zip(mf.map.objects, back.objects):
+        assert (a.kind, a.prop_id, a.position, a.scale, a.color, a.floors, a.collision, a.glow, a.team, a.spawn_type,
+                a.reserve, a.letter) == (b.kind, b.prop_id, b.position, b.scale, b.color, b.floors, b.collision, b.glow,
+                                         b.team, b.spawn_type, b.reserve, b.letter)
+
+
+def test_deflate_level_is_detected_and_kept(tmp_path):
+    m = new_map()
+    m.objects = all_kinds()
+    data6 = sw.write(m, 6)
+    mf = swmap.loads(data6)
+    assert mf.level == 6 and mf.dumps() == data6
+    write_folder(mf, tmp_path / "f")
+    assert json.loads((tmp_path / "f" / "map.json").read_text())["deflate_level"] == 6
+    assert read_folder(tmp_path / "f").dumps() == data6
+    data9 = sw.write(m, 9)
+    assert swmap.loads(data9).level == 9
+    assert "deflate_level" not in json.loads((write_folder(swmap.loads(data9), tmp_path / "g") or (tmp_path / "g" / "map.json")).read_text())
+
+
+def test_deflated_body_and_header_split():
+    m = new_map()
+    m.name, m.author = "Привіт", "ü"
+    m.preview_jpeg = render_preview(m.terrain)
+    data = sw.write(m)
+    assert sw.read(data).name == "Привіт"
+    assert inflated_body(data)[:1] and len(data) - len(deflated_body(data)) > 40
+
+
+# ---------------------------------------------------------------- paint layers
+def test_last_layer_is_the_implied_one(tmp_path):
+    """swformats stores the FIRST layerCount-1 planes; the last layer is 255 - sum(the others)."""
+    m = new_map()                                      # flat(): the first layer (grass, id 2) covers everything
+    mf = MapFile(m)
+    write_folder(mf, tmp_path / "f")
+    ts = tmp_path / "f" / "terrain"
+    assert sorted(p.name for p in ts.glob("paint_*.png")) == ["paint_00.png", "paint_01.png", "paint_02.png"]
+    assert (np.array(Image.open(ts / "paint_00.png")) == 255).all()
+    assert not np.array(Image.open(ts / "paint_01.png")).any()
+    assert not np.array(Image.open(tmp_path / "f" / "_derived" / "paint_03_implied.png")).any()
+    # paint the last layer by taking weight away from the first
+    p0 = np.array(Image.open(ts / "paint_00.png")); p0[:10, :] = 0
+    Image.fromarray(p0, "L").save(ts / "paint_00.png")
+    t = read_folder(tmp_path / "f").map.terrain
+    w = T.splat_array(t)
+    assert (w[-10:, :, 3] == 255).all() and (w[:-10, :, 0] == 255).all()       # image top = +z = last array rows
+    assert (w.sum(axis=2, dtype=int) == 255).all()
+
+
+def test_overpainted_weights_are_reported_not_hidden(tmp_path):
+    write_folder(MapFile(new_map()), tmp_path / "f")
+    ts = tmp_path / "f" / "terrain"
+    Image.fromarray(np.full((128, 128), 100, np.uint8), "L").save(ts / "paint_01.png")      # 255 + 100 > 255
+    mf = read_folder(tmp_path / "f")
+    assert mf.notes and "more than 255" in mf.notes[0]
+    sw.read(mf.dumps())                                # swformats caps the weights, so the file is still valid
+
+
+def test_pngs_are_top_down_with_plus_z_at_the_top(tmp_path):
+    m = new_map()
+    res = m.terrain.height_res
+    for x in range(res):
+        m.terrain.heights[0 * res + x] = 40000               # z = -size/2 -> bottom of the image
+    m.terrain.heights[(res - 1) * res + 0] = 50000           # z = +size/2, x = -size/2 -> top-left
+    write_folder(MapFile(m), tmp_path / "f")
+    hm = np.array(Image.open(tmp_path / "f" / "terrain" / "heightmap.png"))
+    assert (hm[-1, :] == 40000).all() and hm[0, 0] == 50000
+    assert read_folder(tmp_path / "f").map.terrain.heights == m.terrain.heights
+
+
+def test_old_folder_format_4_still_packs_identically(tmp_path):
+    """folder/4 numbered the stored paint layers from 1 and defaulted to zlib level 6; the bytes were the same planes."""
+    m = new_map()
+    m.terrain.splat[(5 * 128 + 5) * 4:(5 * 128 + 5) * 4 + 4] = bytes([0, 99, 156, 0])
+    mf = MapFile(m, 6)
+    data = mf.dumps()
+    write_folder(mf, tmp_path / "f")
+    ts, meta = tmp_path / "f" / "terrain", tmp_path / "f" / "map.json"
+    for i in (2, 1, 0):
+        (ts / f"paint_{i:02d}.png").rename(ts / f"paint_{i + 1:02d}.png")
+    j = json.loads(meta.read_text()); j["format"] = "swmap-folder/4"; j.pop("deflate_level"); meta.write_text(json.dumps(j))
+    assert read_folder(tmp_path / "f").dumps() == data
+
+
+def test_unknown_folder_format_rejected(tmp_path):
+    write_folder(MapFile(new_map()), tmp_path / "f")
+    meta = tmp_path / "f" / "map.json"
+    j = json.loads(meta.read_text()); j["format"] = "swmap-folder/3"; meta.write_text(json.dumps(j))
+    with pytest.raises(FormatError):
+        read_folder(tmp_path / "f")
+
+
+# ---------------------------------------------------------------- JSON mapping
+def test_json_has_no_redundant_info_and_no_fixed_size_arrays(tmp_path):
+    m = new_map()
+    m.objects = all_kinds()
+    write_folder(MapFile(m), tmp_path / "f")
+    text = (tmp_path / "f" / "map.json").read_text(encoding="utf-8")
+    meta = json.loads(text)
+    for gone in ("counts", "height_formula", "height_points", "modified_utc", "modified_ticks"):
+        assert gone not in text
+    assert meta["format"] == "swmap-folder/5" and meta["modified"].endswith("Z")
+    assert len(meta["modified"].split(".")[1]) == 8
+    objs = json.loads((tmp_path / "f" / "objects.json").read_text(encoding="utf-8"))
+    for o in objs:
+        assert set(o["position"]) == {"x", "y", "z"}
+        if "scale" in o:
+            assert set(o["scale"]) == {"x", "y", "z"}
+        if isinstance(o.get("rotation"), dict):
+            assert set(o["rotation"]) == {"x", "y", "z", "w"} and all(isinstance(v, float) for v in o["rotation"].values())
+
+
+def test_quaternion_floats_roundtrip_exactly():
+    rng = random.Random(3)
+    for _ in range(2000):
+        q = tuple(rng.randint(-32767, 32767) / 32767.0 for _ in range(4))
+        if abs(q[0]) < 1e-4 and abs(q[2]) < 1e-4:
+            continue                                   # that one is a plain yaw, covered below
+        o = sw.MapObject(sw.PROP, prop_id=1, rotation=q)
+        assert obj_from_json(json.loads(json.dumps(obj_to_json(o)))).rotation == q
+
+
+def test_yaw_and_position_roundtrip_through_json():
+    rng = random.Random(4)
+    for _ in range(2000):
+        raw = rng.randint(0, 65535)
+        o = sw.MapObject(sw.PROP, prop_id=2, position=tuple(rng.randint(-100000, 100000) / 64.0 for _ in range(3)))
+        o.yaw = raw / 65536 * 360
+        back = obj_from_json(json.loads(json.dumps(obj_to_json(o))))
+        assert back.position == o.position              # metres in the JSON, exact multiples of 1/128
+        assert round((back.yaw % 360) / 360 * 65536) & 0xFFFF == raw     # the stored 16-bit step is unchanged
+
+
+def test_timestamp_is_lossless():
+    for t in (639266060456442096, 621355968000000000, 639000000000000001, 864000000000):
+        assert iso_to_ticks(ticks_to_iso(t)) == t
+    assert iso_to_ticks("2026-10-03T06:34:05Z") == iso_to_ticks("2026-10-03T06:34:05.0000000Z")
+
+
+def test_object_json_field_names():
+    spawn = sw.MapObject(sw.SPAWN, position=(2.0, 4.0, 6.0), team=sw.TEAM_RED, spawn_type=sw.SPAWN_WATER, reserve=True)
+    spawn.yaw = 90.0
+    assert obj_to_json(spawn) == {"kind": "spawn", "position": {"x": 1.0, "y": 2.0, "z": 3.0}, "rotation": 90.0,
+                                  "team": "red", "vehicle_type": "boat", "reserve": True}
+    prop = sw.MapObject(sw.PROP, prop_id=3, scale=(2.0, 2.0, 2.0), collision=sw.COLLISION_OFF)
+    j = obj_to_json(prop)
+    assert j["prop_id"] == 3 and j["size"] == 2.0 and j["collision"] is False
+    assert obj_from_json(j).collision == sw.COLLISION_OFF and obj_from_json(j).scale == (2.0, 2.0, 2.0)
+    assert "collision" not in obj_to_json(sw.MapObject(sw.PROP, prop_id=3)) and "size" not in obj_to_json(sw.MapObject(sw.PROP))
+    cp = sw.MapObject(sw.CAPTURE_POINT, scale=(30.0,) * 3, letter=2)
+    assert obj_to_json(cp)["radius"] == 30.0 and obj_to_json(cp)["letter"] == "c" and "rotation" not in obj_to_json(cp)
+    # older folders / aliases
+    assert obj_from_json({"kind": "model", "model_id": 7, "position": {"x": 0, "y": 0, "z": 0}}).prop_id == 7
+    assert obj_from_json({"kind": "spawn", "position": {"x": 0, "y": 0, "z": 0}, "team": "deathmatch"}).team == sw.TEAM_DEATHMATCH
+    with pytest.raises(ValueError):
+        obj_from_json({"kind": "prop", "prop_id": 1, "position": {"x": 0, "y": 0, "z": 0}, "collision": "on"})
+    with pytest.raises(ValueError):
+        obj_from_json({"kind": "prop", "position": {"x": 0, "y": 0, "z": 0}})
+
+
+def test_bad_hex_colours_rejected():
+    base = {"kind": "prop", "prop_id": 1, "position": {"x": 0, "y": 0, "z": 0}}
+    assert obj_from_json({**base, "color": "#11223344"}).color == (0x11, 0x22, 0x33, 0x44)
+    assert obj_from_json({**base, "color": "#112233"}).color == (0x11, 0x22, 0x33, 0xFF)
+    with pytest.raises(ValueError):
+        obj_from_json({**base, "color": "#1122"})
+
+
+def test_weather_and_fog_mode_names(tmp_path):
+    m = new_map()
+    m.env.weather, m.env.fog_mode = 3, sw.FOG_EXPONENTIAL_SQUARED
+    write_folder(MapFile(m), tmp_path / "f")
+    env = json.loads((tmp_path / "f" / "map.json").read_text())["environment"]
+    assert env["weather"] == "rain" and env["fog_mode"] == "exp_squared"
+    meta = json.loads((tmp_path / "f" / "map.json").read_text())
+    meta["environment"]["weather"], meta["environment"]["fog_mode"] = "CLOUDY", 2        # any case, or numbers
+    (tmp_path / "f" / "map.json").write_text(json.dumps(meta))
+    e = read_folder(tmp_path / "f").map.env
+    assert e.weather == 2 and e.fog_mode == sw.FOG_EXPONENTIAL
+
+
+# ---------------------------------------------------------------- container versions come from swformats
+def test_version_follows_translucent_colours(tmp_path):
+    m = new_map()
+    m.objects = [sw.MapObject(sw.PROP, prop_id=1, position=(1, 2, 3), color=(255, 136, 0, 64)),
+                 sw.MapObject(sw.PROP, prop_id=1, position=(2, 2, 3), color=(255, 136, 0, 255))]
+    write_folder(MapFile(m), tmp_path / "f")
+    objs = json.loads((tmp_path / "f" / "objects.json").read_text())
+    assert objs[0]["color"] == "#ff880040" and objs[1]["color"] == "#ff8800"
+    assert "container_version" not in json.loads((tmp_path / "f" / "map.json").read_text())
+    assert int.from_bytes(read_folder(tmp_path / "f").dumps()[4:6], "little") == 2
+    objs[0]["color"] = "#ff8800"                         # no alpha left -> version 1 by itself
+    (tmp_path / "f" / "objects.json").write_text(json.dumps(objs))
+    assert int.from_bytes(read_folder(tmp_path / "f").dumps()[4:6], "little") == 1
 
 
 # ---------------------------------------------------------------- validation
-@pytest.mark.parametrize("mut,frag", [
-    (lambda m: setattr(m.props[0], "scale", 0.01), "scale"),
-    (lambda m: setattr(m.props[0], "floors", 41), "floors"),
-    (lambda m: setattr(m.props[3], "vehicle_type", 3), "vehicle_type"),
-    (lambda m: setattr(m.props[5], "rotation", 10.0), "rotated"),
-    (lambda m: setattr(m.props[0], "position", Vec3(0, 5000, 0)), "outside"),
-    (lambda m: setattr(m.environment, "shadow_distance_units", 5), "shadow"),
+@pytest.mark.parametrize("mut,level,frag", [
+    (lambda m: setattr(m.objects[0], "scale", (0.01,) * 3), "warning", "scale"),
+    (lambda m: setattr(m.objects[1], "floors", 41), "warning", "floors"),
+    (lambda m: setattr(m.objects[4], "spawn_type", 3), "warning", "vehicle type"),
+    (lambda m: setattr(m.objects[6], "rotation", (0.0, 0.5, 0.0, 0.8660254)), "warning", "rotated"),
+    (lambda m: setattr(m.objects[0], "position", (0.0, 5000.0, 0.0)), "warning", "y ="),
+    (lambda m: setattr(m.objects[0], "position", (9000.0, 5.0, 0.0)), "warning", "outside the map"),
+    (lambda m: setattr(m.objects[0], "prop_id", 60000), "warning", "catalog"),
+    (lambda m: setattr(m.env, "shadow_distance", 5), "warning", "shadow"),
+    (lambda m: setattr(m, "name", "<b>x</b>"), "warning", "name"),
+    (lambda m: m.objects.append(sw.MapObject(sw.CAPTURE_POINT, letter=0)), "error", "duplicate capture point"),
+    (lambda m: setattr(m.terrain, "alpha_res", 100), "error", "alpha_res"),
 ])
-def test_validation_catches(mut, frag):
-    m = swmap.SwMap.new("T", "a", 512, 129, 128)
-    m.props = all_kinds()
+def test_validation_catches(mut, level, frag):
+    m = new_map()
+    m.objects = all_kinds()
     mut(m)
-    errs = [i for i in swmap.validate(m) if i.level == "error"]
-    assert errs and any(frag in i.message for i in errs), errs
+    issues = [i for i in swmap.validate(m) if i.level == level]
+    assert issues and any(frag in i.message for i in issues), [str(i) for i in swmap.validate(m)]
+
+
+def test_valid_map_has_no_issues():
+    m = new_map()
+    m.objects = all_kinds()
+    m.objects[1].rotation = (0.0, 0.7071067690849304, 0.0, 0.7071067690849304)
+    issues = swmap.validate(m)
+    assert not issues, [str(i) for i in issues]
 
 
 def test_reader_rejects_garbage():
     with pytest.raises(FormatError):
         swmap.loads(b"nope")
-    m = swmap.SwMap.new()
-    data = bytearray(swmap.dumps(m))
+    data = sw.write(new_map())
     with pytest.raises(FormatError):
-        swmap.loads(bytes(data[:-5]))
+        swmap.loads(data[:-5])
+
+
+# ---------------------------------------------------------------- preview
+def test_generated_preview_is_accepted_by_the_game_rules(tmp_path):
+    m = new_map()
+    m.terrain.heights[60 * 129 + 60] = 40000
+    jpg = render_preview(m.terrain)
+    assert sw.is_valid_preview(jpg) and sw.preview_size(jpg) == (640, 320)
+    m.preview_jpeg = jpg
+    assert sw.read(sw.write(m)).preview_jpeg == jpg
+
+
+# ---------------------------------------------------------------- CLI
+def test_new_unpack_pack_cycle(tmp_path, capsys):
+    f, out = str(tmp_path / "blank"), str(tmp_path / "blank.swmap")
+    assert main(["new", f, "--size", "256", "--height-res", "129", "--paint-resolution", "128", "--floor", "5"]) == 0
+    assert main(["validate", f]) == 0
+    assert main(["pack", f, "-o", out]) == 0
+    m = swmap.load(out).map
+    assert m.terrain.size_meters == 256 and m.terrain.height_res == 129 and m.preview_jpeg and sw.is_valid_preview(m.preview_jpeg)
+    assert abs(T.height_to_m(m.terrain.heights[0]) - 5.0) < 0.01
+    assert main(["info", out]) == 0
+    assert main(["verify", out]) == 0
+    assert capsys.readouterr().out.strip().endswith("identical")
+
+
+def test_pack_touches_modified_time_unless_no_touch(tmp_path):
+    m = new_map()
+    write_folder(MapFile(m), tmp_path / "f")
+    main(["pack", str(tmp_path / "f"), "-o", str(tmp_path / "a.swmap")])
+    main(["pack", str(tmp_path / "f"), "--no-touch", "-o", str(tmp_path / "b.swmap")])
+    assert swmap.load(tmp_path / "a.swmap").map.modified_ticks > 639000000000000000
+    assert swmap.load(tmp_path / "b.swmap").map.modified_ticks == 639000000000000000
+
+
+def test_pack_refuses_what_the_game_would_reject(tmp_path):
+    write_folder(MapFile(new_map()), tmp_path / "f")
+    objs = [{"kind": "capture_point", "position": {"x": 0, "y": 0, "z": 0}, "radius": 10, "letter": "a"}] * 2
+    (tmp_path / "f" / "objects.json").write_text(json.dumps(objs))
+    assert main(["pack", str(tmp_path / "f"), "-o", str(tmp_path / "x.swmap")]) == 1
+    assert not (tmp_path / "x.swmap").exists()
 
 
 # ---------------------------------------------------------------- real samples (optional)
 @pytest.mark.skipif(not SAMPLES, reason="set SWMAP_SAMPLES to a folder of real .swmap files")
 @pytest.mark.parametrize("path", SAMPLES)
-def test_real_sample_byte_identical(path, tmp_path):
+def test_real_sample_roundtrips(path, tmp_path):
     raw = open(path, "rb").read()
-    m = swmap.load(path)
-    assert swmap.dumps(m) == raw
-    write_folder(m, tmp_path / "f")
-    assert swmap.dumps(read_folder(tmp_path / "f")) == raw
-    assert not [i for i in swmap.validate(m) if i.level == "error"]
-
-
-# ---------------------------------------------------------------- folder JSON shape
-def test_json_has_no_redundant_info_and_no_fixed_size_arrays(tmp_path):
-    import json
-    m = swmap.SwMap.new("T", "a", 512, 129, 128)
-    m.props = all_kinds()
-    write_folder(m, tmp_path / "f")
-    meta = json.loads((tmp_path / "f" / "map.json").read_text(encoding="utf-8"))
-    text = (tmp_path / "f" / "map.json").read_text(encoding="utf-8")
-    for gone in ("counts", "height_formula", "height_points", "paint_resolution", "modified_utc", "modified_ticks"):
-        assert gone not in text
-    assert meta["modified"].endswith("Z") and len(meta["modified"].split(".")[1]) == 8       # 7 digits + Z
-    objs = json.loads((tmp_path / "f" / "objects.json").read_text(encoding="utf-8"))
-    assert isinstance(objs, list)
-    for o in objs:
-        assert set(o["position"]) == {"x", "y", "z"}
-        for k in ("scale",):
-            if k in o: assert set(o[k]) == {"x", "y", "z"}
-        if isinstance(o.get("rotation"), dict):
-            assert set(o["rotation"]) == {"x", "y", "z", "w"} and all(isinstance(v, float) for v in o["rotation"].values())
-    # nothing but dicts / scalars except the variable-length layer id list
-    def no_lists(v, path=""):
-        if isinstance(v, dict):
-            for k, x in v.items(): no_lists(x, path + "/" + k)
-        elif isinstance(v, list):
-            assert path == "/paint_layer_ids", path
-    no_lists(meta)
-
-
-def test_quaternion_floats_roundtrip_exactly():
-    import json
-    from swmap.folder import prop_to_json, prop_from_json
-    rng = random.Random(3)
-    for _ in range(2000):
-        q = Quaternion(*(rng.randint(-32767, 32767) / 32767.0 for _ in range(4)))
-        p = Prop(Kind.MODEL, Vec3(0, 0, 0), model_id=1, rotation=q)
-        back = prop_from_json(json.loads(json.dumps(prop_to_json(p))))
-        assert back.rotation == q
-
-
-def test_yaw_and_position_roundtrip_through_json():
-    import json
-    from swmap.folder import prop_to_json, prop_from_json
-    rng = random.Random(4)
-    for _ in range(2000):
-        raw = rng.randint(0, 65535)
-        p = Prop(Kind.MODEL, Vec3(*(rng.randint(-100000, 100000) / 128.0 for _ in range(3))), model_id=2,
-                 rotation=raw * 45.0 / 8192.0)
-        back = prop_from_json(json.loads(json.dumps(prop_to_json(p))))
-        assert back.position == p.position
-        # the JSON shows yaw rounded to 4 decimals; what is stored (a 16-bit step) must be unchanged
-        assert int(round(back.rotation * 8192.0 / 45.0)) & 0xFFFF == raw
-
-
-def test_timestamp_is_lossless():
-    from swmap.model import ticks_to_iso, iso_to_ticks
-    for t in (639266060456442096, 621355968000000000, 639000000000000001, 0 + 864000000000):
-        assert iso_to_ticks(ticks_to_iso(t)) == t
-    assert iso_to_ticks("2026-10-03T06:34:05Z") == iso_to_ticks("2026-10-03T06:34:05.0000000Z")
-
-
-def test_prop_json_uses_model_field_names():
-    from swmap.folder import prop_to_json, prop_from_json
-    spawn = Prop(Kind.SPAWN, Vec3(1, 2, 3), rotation=90.0, team=Team.RED, vehicle_type=VehicleType.BOAT, reserve=True)
-    assert prop_to_json(spawn) == {"kind": "spawn", "position": {"x": 1, "y": 2, "z": 3}, "rotation": 90.0,
-                                   "team": "red", "vehicle_type": "boat", "reserve": True}
-    model = Prop(Kind.MODEL, Vec3(0, 0, 0), model_id=3, rotation=0.0, scale=2.0, collision=False)
-    j = prop_to_json(model)
-    assert j["size"] == 2.0 and j["collision"] is False
-    assert prop_from_json(j) == model
-    assert "collision" not in prop_to_json(Prop(Kind.MODEL, Vec3(0, 0, 0), model_id=3, rotation=0.0))   # default = omitted
-    # legacy team name still readable
-    assert prop_from_json({"kind": "spawn", "position": {"x": 0, "y": 0, "z": 0}, "team": "deathmatch"}).team == Team.FFA
-    with pytest.raises(ValueError):
-        prop_from_json({"kind": "model", "model_id": 1, "position": {"x": 0, "y": 0, "z": 0}, "collision": "on"})
-
-
-def test_weather_and_fog_mode_enums(tmp_path):
-    import json
-    from swmap.model import FogMode, Weather
-    assert [(w.name, w.value) for w in Weather] == [("CLEAR", 0), ("SUNNY", 1), ("CLOUDY", 2), ("RAIN", 3)]
-    assert [(f.name, f.value) for f in FogMode] == [("LINEAR", 1), ("EXPONENTIAL", 2), ("EXP_SQUARED", 3)]
-    m = swmap.SwMap.new("T", "a", 512, 129, 128)
-    m.environment.weather, m.environment.fog_mode = Weather.RAIN, FogMode.EXP_SQUARED
-    m2 = swmap.loads(swmap.dumps(m))
-    assert m2.environment.weather is Weather.RAIN and m2.environment.fog_mode is FogMode.EXP_SQUARED
-    write_folder(m2, tmp_path / "f")
-    env = json.loads((tmp_path / "f" / "map.json").read_text())["environment"]
-    assert env["weather"] == "rain" and env["fog_mode"] == "exp_squared"
-    env["weather"], env["fog_mode"] = "CLOUDY", 2                       # names (any case) and numbers both load
-    meta = json.loads((tmp_path / "f" / "map.json").read_text()); meta["environment"] = env
-    (tmp_path / "f" / "map.json").write_text(json.dumps(meta))
-    m3 = read_folder(tmp_path / "f")
-    assert m3.environment.weather is Weather.CLOUDY and m3.environment.fog_mode is FogMode.EXPONENTIAL
-
-
-def test_unknown_weather_value_survives_with_warning(tmp_path):
-    m = swmap.SwMap.new("T", "a", 512, 129, 128)
-    m.environment.weather, m.environment.fog_mode = 9, 0
-    m2 = swmap.loads(swmap.dumps(m))
-    assert m2.environment.weather == 9 and m2.environment.fog_mode == 0
-    assert swmap.dumps(m2) == swmap.dumps(m)
-    write_folder(m2, tmp_path / "f")
-    assert swmap.dumps(read_folder(tmp_path / "f")) == swmap.dumps(m)
-    issues = swmap.validate(m2)
-    assert not [i for i in issues if i.level == "error"]
-    assert sum("not a known value" in i.message for i in issues) == 2
-
-
-def test_pack_touches_modified_time_unless_no_touch(tmp_path):
-    from swmap.cli import main
-    m = swmap.SwMap.new("T", "a", 512, 129, 128)
-    m.header.modified_ticks = 639000000000000000
-    write_folder(m, tmp_path / "f")
-    main(["pack", str(tmp_path / "f"), "-o", str(tmp_path / "a.swmap")])
-    main(["pack", str(tmp_path / "f"), "--no-touch", "-o", str(tmp_path / "b.swmap")])
-    assert swmap.load(tmp_path / "a.swmap").header.modified_ticks > 639000000000000000
-    assert swmap.load(tmp_path / "b.swmap").header.modified_ticks == 639000000000000000
-
-
-def test_pngs_are_top_down_with_plus_z_at_the_top(tmp_path):
-    from PIL import Image
-    m = swmap.SwMap.new("T", "a", 512, 129, 128)
-    m.terrain.heights[0, :] = 40000            # array row 0 = z = -size/2  -> bottom of the image
-    m.terrain.heights[-1, 0] = 50000           # last row (z = +size/2), first column (x = -size/2) -> top-left
-    m.terrain.layers[0][0, :] = 200
-    write_folder(m, tmp_path / "f")
-    hm = np.array(Image.open(tmp_path / "f" / "terrain" / "heightmap.png"))
-    assert (hm[-1, :] == 40000).all() and hm[0, 0] == 50000
-    paint = np.array(Image.open(tmp_path / "f" / "terrain" / "paint_01.png"))
-    assert (paint[-1, :] == 200).all() and not paint[0].any()
-    m2 = read_folder(tmp_path / "f")
-    assert (m2.terrain.heights == m.terrain.heights).all() and (m2.terrain.layers[0] == m.terrain.layers[0]).all()
-
-
-# ---------------------------------------------------------------- container version 1/2 (RGB / RGBA colour)
-# The game (CustomMapSerializer.VersionFor + the check at the end of ReadBody) demands: version == 2 exactly
-# when some model prop has a colour with alpha < 255, otherwise 1. Any other combination is rejected.
-def _color_map(*colors):
-    m = swmap.SwMap.new("T", "a", 512, 129, 128)
-    m.props = [Prop(Kind.MODEL, Vec3(i + 1, 2, 3), model_id=1, rotation=0.0, color=c) for i, c in enumerate(colors)]
-    return m
-
-
-def _stored_version(data):
-    return int.from_bytes(data[4:6], "little")
-
-
-def test_version_is_1_without_translucent_colours():
-    for colors in ([], [None], [Color(10, 20, 30)], [Color(10, 20, 30, 255), None]):
-        data = swmap.dumps(_color_map(*colors))
-        assert _stored_version(data) == 1
-        back = swmap.loads(data)
-        assert [p.color for p in back.props] == [None if c is None else Color(c.r, c.g, c.b, 255) for c in colors]
-        assert swmap.dumps(back) == data
-
-
-def test_version_is_2_as_soon_as_one_colour_has_alpha():
-    m = _color_map(Color(1, 2, 3), Color(10, 20, 30, 40), None)         # mixed: one translucent is enough
-    data = swmap.dumps(m)
-    assert _stored_version(data) == 2
-    back = swmap.loads(data)
-    assert [p.color for p in back.props] == [Color(1, 2, 3, 255), Color(10, 20, 30, 40), None]
-    assert swmap.dumps(back) == data
-
-
-def test_colour_is_three_bytes_in_v1_and_four_in_v2():
-    from swmap.payload import encode_payload
-    m = _color_map(Color(10, 20, 30))
-    v1 = encode_payload(m.environment, m.terrain, m.props, 1)
-    v2 = encode_payload(m.environment, m.terrain, m.props, 2)
-    assert len(v2) == len(v1) + 1
-    assert bytes([10, 20, 30]) in v1 and bytes([10, 20, 30, 255]) in v2
-
-
-def test_folder_roundtrip_with_alpha_and_version_follows_content(tmp_path):
-    m = _color_map(Color(255, 136, 0, 64), Color(255, 136, 0))
-    data = swmap.dumps(m)
-    write_folder(m, tmp_path / "f")
-    import json
-    objs = json.loads((tmp_path / "f" / "objects.json").read_text())
-    assert objs[0]["color"] == "#ff880040" and objs[1]["color"] == "#ff8800"
-    assert "container_version" not in json.loads((tmp_path / "f" / "map.json").read_text())
-    assert swmap.dumps(read_folder(tmp_path / "f")) == data
-    # editing the folder so that no alpha is left switches the file back to version 1 automatically
-    objs[0]["color"] = "#ff8800"
-    (tmp_path / "f" / "objects.json").write_text(json.dumps(objs))
-    assert _stored_version(swmap.dumps(read_folder(tmp_path / "f"))) == 1
-
-
-def test_bad_hex_colours_rejected():
-    from swmap.folder import prop_from_json
-    base = {"kind": "model", "model_id": 1, "position": {"x": 0, "y": 0, "z": 0}}
-    assert prop_from_json({**base, "color": "#11223344"}).color == Color(0x11, 0x22, 0x33, 0x44)
-    assert prop_from_json({**base, "color": "#112233"}).color == Color(0x11, 0x22, 0x33, 0xFF)
-    with pytest.raises(ValueError):
-        prop_from_json({**base, "color": "#1122"})
-
-
-def test_wrong_version_file_is_reported_and_repaired_on_save():
-    """A file with a version the game would reject (e.g. version 2 but nothing translucent) still loads,
-    validate says why the game refuses it, and saving writes the correct version."""
-    from swmap.payload import encode_payload
-    from swmap.container import write_container
-    from swmap.caps import compute_caps
-    m = _color_map(Color(10, 20, 30))
-    swmap.dumps(m)                                  # generates the preview
-    bad = write_container(m.header, compute_caps(m.props), m.preview_jpg,
-                          encode_payload(m.environment, m.terrain, m.props, 2), 6, 2)
-    assert _stored_version(bad) == 2
-    loaded = swmap.loads(bad)
-    assert any(i.level == "error" and "version" in i.message for i in swmap.validate(loaded))
-    fixed = swmap.dumps(loaded)
-    assert _stored_version(fixed) == 1 and swmap.loads(fixed).props[0].color == Color(10, 20, 30)
-    assert not [i for i in swmap.validate(swmap.loads(fixed)) if i.level == "error"]
-
-
-def test_unknown_container_version_rejected():
-    data = bytearray(swmap.dumps(_color_map(Color(1, 2, 3))))
-    data[4:6] = b"\x03\x00"
-    with pytest.raises(FormatError):
-        swmap.loads(bytes(data))
+    mf = swmap.load(path)
+    write_folder(mf, tmp_path / "f")
+    again = read_folder(tmp_path / "f").dumps()
+    # same header and same inflated body; the deflate stream is identical whenever the same zlib wrote the file
+    assert again[:len(again) - len(deflated_body(again)) - 4] == raw[:len(raw) - len(deflated_body(raw)) - 4]   # up to bodyLength
+    assert inflated_body(again) == inflated_body(raw)
+    assert not [i for i in swmap.validate(mf.map) if i.level == "error"]

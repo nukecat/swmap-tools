@@ -3,20 +3,17 @@ from __future__ import annotations
 import argparse, collections, sys, tempfile
 from pathlib import Path
 
-from swmap.container import read_container
+from swformats import FormatError, MapCatalog, swmap as sw
 
 from . import __version__
-from .binio import FormatError
-from .caps import compute_caps
-from .fileio import load, dumps
-from .folder import read_folder, write_folder
-from .model import Kind, SwMap
-from .props import version_for
+from .fileio import MapFile, inflated_body, load
+from .folder import FOG_MODES, TEAMS, VEHICLES, WEATHER, read_folder, write_folder
+from .terrain import height_to_m, heights_array
 from .validate import validate
 
 
-def _load_any(path: Path, **kw) -> SwMap:
-    return read_folder(path, **kw) if path.is_dir() else load(path)
+def _load_any(path: Path) -> MapFile:
+    return read_folder(path) if path.is_dir() else load(path)
 
 
 def _print_issues(issues) -> int:
@@ -28,58 +25,70 @@ def _print_issues(issues) -> int:
 # ------------------------------------------------------------------------- commands
 def cmd_unpack(a):
     src = Path(a.file)
-    m = load(src)
+    mf = load(src)
     out = Path(a.output) if a.output else src.with_suffix("")
-    write_folder(m, out, force=a.force, derived=not a.no_derived)
-    print(f"unpacked {src.name} -> {out}/  ({len(m.props)} props, heightmap {m.terrain.height_points}x{m.terrain.height_points}, "
-          f"{len(m.terrain.layer_ids)} paint layers)")
+    write_folder(mf, out, force=a.force, derived=not a.no_derived)
+    t = mf.map.terrain
+    print(f"unpacked {src.name} -> {out}/  ({len(mf.map.objects)} objects, heightmap {t.height_res}x{t.height_res}, "
+          f"{t.layer_count} paint layers)")
 
 
 def cmd_pack(a):
     src = Path(a.folder)
-    m = read_folder(src, regenerate_preview=a.regenerate_preview, touch=not a.no_touch)
+    mf = read_folder(src, regenerate_preview=a.regenerate_preview, touch=not a.no_touch)
+    for n in mf.notes:
+        print("note:", n, file=sys.stderr)
     if not a.no_validate:
-        issues = validate(m)
+        issues = validate(mf.map)
         if issues:
             print("validation:", file=sys.stderr)
         if _print_issues(issues):
             print("not packed: fix the errors above (or use --no-validate)", file=sys.stderr)
             return 1
     out = Path(a.output) if a.output else src.with_suffix(".swmap")
-    data = dumps(m, a.level)
+    data = mf.dumps(a.level)
     out.write_bytes(data)
-    print(f"packed {src} -> {out}  ({len(data):,} bytes, {len(m.props)} props)")
+    print(f"packed {src} -> {out}  ({len(data):,} bytes, {len(mf.map.objects)} objects)")
 
 
 def cmd_info(a):
     p = Path(a.path)
-    m = _load_any(p)
-    h, e, t = m.header, m.environment, m.terrain
+    mf = _load_any(p)
+    m = mf.map
+    e, t = m.env, m.terrain
+    cat = MapCatalog.default()
     print(f"{p.name}")
-    print(f"  name      {h.name!r}   author {h.author!r}   container v{getattr(m, 'source_version', version_for(m.props))}")
-    print(f"  guid      {h.guid}   modified {h.modified_utc:%Y-%m-%d %H:%M:%S} UTC")
-    print(f"  size      {h.size_m:g} m   heightmap {t.height_points}x{t.height_points}   paint {t.paint_resolution}x{t.paint_resolution}   layers {t.layer_ids}")
-    from .terrain import height_to_m
-    z = height_to_m(t.heights)
+    print(f"  name      {m.name!r}   author {m.author!r}   container v{m.version}")
+    print(f"  id        {m.id}   modified {m.modified:%Y-%m-%d %H:%M:%S} UTC")
+    print(f"  size      {t.size_meters:g} m   heightmap {t.height_res}x{t.height_res}   paint {t.alpha_res}x{t.alpha_res}   "
+          f"layers {[cat.layers[i].name if i in cat.layers else i for i in t.layer_ids]}")
+    z = height_to_m(heights_array(t))
     print(f"  heights   {z.min():.1f} .. {z.max():.1f} m")
-    print(f"  env       water={e.water} ice={e.ice} walls={e.edge_walls} fog={e.fog} time={e.time:g} weather={getattr(e.weather, 'name', e.weather)} "
-          f"shadow={e.shadow_distance_m:g} m fog_mode={getattr(e.fog_mode, 'name', e.fog_mode)} fog={e.fog_distance_m:g} m #{''.join('%02x' % c for c in e.fog_color)}")
-    kinds = collections.Counter(Kind(q.kind).name.lower() for q in m.props)
-    print(f"  props     {len(m.props)}   " + "  ".join(f"{k}={v}" for k, v in sorted(kinds.items())))
-    models = collections.Counter(q.model_id for q in m.props if q.kind == Kind.MODEL)
-    if models:
-        print("  models    " + "  ".join(f"#{k}x{v}" for k, v in models.most_common(8)) + ("  ..." if len(models) > 8 else ""))
-    caps = compute_caps(m.props)
-    names = ("ffa", "red", "blue")
-    sp = [f"{names[t]}: " + "/".join(f"{caps[t * 3 + s]}{v}" for s, v in enumerate("TBP")) for t in range(3) if any(caps[t * 3:t * 3 + 3])]
-    print(f"  caps      spawns ({', '.join(sp) or 'none'}; T=tank B=boat P=plane)  capture points={caps[9]}  player spawns={caps[10]}")
+    print(f"  env       water={e.water} ice={e.ice} walls={e.edge_walls} fog={e.fog} time={e.time:g} "
+          f"weather={WEATHER.get(e.weather, e.weather)} shadow={e.shadow_distance / sw.METERS_TO_UNITS:g} m "
+          f"fog_mode={FOG_MODES.get(e.fog_mode, e.fog_mode)} fog={e.fog_distance / sw.METERS_TO_UNITS:g} m "
+          f"#{''.join('%02x' % c for c in e.fog_color)}")
+    kinds = collections.Counter(o.kind for o in m.objects)
+    names = {sw.PROP: "prop", sw.SPAWN: "spawn", sw.CAPTURE_POINT: "capture_point", sw.PLAYER_SPAWN: "player_spawn"}
+    print(f"  objects   {len(m.objects)}   " + "  ".join(f"{names[k]}={v}" for k, v in sorted(kinds.items())))
+    props = collections.Counter(o.prop_id for o in m.objects if o.kind == sw.PROP)
+    if props:
+        label = lambda i: cat.props[i].name if i in cat.props else f"#{i}"
+        print("  props     " + "  ".join(f"{label(k)}x{v}" for k, v in props.most_common(8)) + ("  ..." if len(props) > 8 else ""))
+    c = m.caps
+    sp = [f"{TEAMS[tm]}: " + "/".join(f"{c.spawn_counts[tm * 3 + s]}{v}" for s, v in enumerate("TBP"))
+          for tm in range(3) if any(c.spawn_counts[tm * 3:tm * 3 + 3])]
+    print(f"  caps      spawns ({', '.join(sp) or 'none'}; T=tank B=boat P=plane)  capture points={c.capture_points}  "
+          f"player spawns={c.player_spawns}")
 
 
 def cmd_validate(a):
     rc = 0
     for f in a.paths:
-        m = _load_any(Path(f))
-        issues = validate(m)
+        mf = _load_any(Path(f))
+        for n in mf.notes:
+            print(f"{f}: note: {n}", file=sys.stderr)
+        issues = validate(mf.map)
         print(f"{f}: {'OK' if not issues else str(len(issues)) + ' issue(s)'}")
         rc |= bool(_print_issues(issues))
     return rc
@@ -93,48 +102,49 @@ def _first_diff(a: bytes, b: bytes) -> str:
     return f"length {len(a)} vs {len(b)}"
 
 
+def _same_content(a: bytes, b: bytes) -> bool:
+    try:
+        return inflated_body(a) == inflated_body(b)
+    except Exception:                                     # noqa: BLE001
+        return False
+
+
 def cmd_verify(a):
     bad = 0
     for f in a.files:
         raw = Path(f).read_bytes()
         try:
-            m = load(f)
-            ok1 = dumps(m) == raw
+            mf = load(f)
+            direct = mf.dumps()
             with tempfile.TemporaryDirectory() as td:
-                write_folder(m, td, force=True)
-                m2 = read_folder(td)
-                data2 = dumps(m2)
-            ok2 = data2 == raw
-            status = "identical" if ok1 and ok2 else ("memory ok, folder differs" if ok1 else "DIFFERS")
-            if not (ok1 and ok2):
+                write_folder(mf, td, force=True)
+                via_folder = read_folder(td).dumps()
+            if direct == raw and via_folder == raw:
+                status = "identical"
+            elif _same_content(direct, raw) and _same_content(via_folder, raw):
+                # only the deflate stream differs: the game's zlib build compressed it differently from Python's
+                status = "same content, different deflate stream"
+            else:
                 bad += 1
-                status += f" ({_first_diff(raw, data2 if ok1 else dumps(m))})"
-        except Exception as ex:                      # noqa: BLE001
+                status = "DIFFERS (" + ("folder: " + _first_diff(raw, via_folder) if direct == raw else _first_diff(raw, direct)) + ")"
+        except Exception as ex:                            # noqa: BLE001
             bad += 1
             status = f"ERROR {type(ex).__name__}: {ex}"
         print(f"{Path(f).name}: {status}")
     return 1 if bad else 0
 
 
-def cmd_payload(a):
-    data = read_container(Path(a.file).read_bytes()).payload
-    if a.output == "-":
-        sys.stdout.buffer.write(data)
-    else:
-        out = Path(a.output) if a.output else Path(a.file).with_suffix(".payload.bin")
-        out.write_bytes(data)
-        print(f"wrote {len(data):,} bytes -> {out}", file=sys.stderr)
-
-
 def cmd_new(a):
-    m = SwMap.new(a.name, a.author, a.size, a.height_points, a.paint_resolution, a.floor)
-    write_folder(m, a.folder, force=a.force)
+    t = sw.Terrain.flat(a.size, height_res=a.height_res, alpha_res=a.paint_resolution, ground_units=a.floor * sw.METERS_TO_UNITS)
+    m = sw.SwMap(name=a.name, author=a.author, terrain=t)
+    m.touch()
+    write_folder(MapFile(m), a.folder, force=a.force, mark_no_preview=False)   # pack renders the preview
     print(f"created empty map folder {a.folder}  (edit it, then: swmap pack {a.folder})")
 
 
 # ------------------------------------------------------------------------- entry
 def main(argv=None) -> int:
-    ap = argparse.ArgumentParser(prog="swmap", description="Unpack / pack .swmap custom maps.")
+    ap = argparse.ArgumentParser(prog="swmap", description="Unpack / pack .swmap custom maps (format code: swformats).")
     ap.add_argument("--version", action="version", version=f"swmap-tools {__version__}")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
@@ -149,7 +159,7 @@ def main(argv=None) -> int:
     s.add_argument("--no-validate", action="store_true", help="do not run the validity checks")
     s.add_argument("--regenerate-preview", action="store_true", help="replace preview.jpg by a generated top-down render")
     s.add_argument("--no-touch", action="store_true", help="keep the modified time from map.json (default: set it to now)")
-    s.add_argument("--level", type=int, default=None, help="zlib level (default: the map's original level, else 6)")
+    s.add_argument("--level", type=int, default=None, help="zlib level (default: the map's original level, else 9)")
     s.set_defaults(fn=cmd_pack)
 
     s = sub.add_parser("info", help="summarise a .swmap file or unpacked folder")
@@ -158,17 +168,16 @@ def main(argv=None) -> int:
     s = sub.add_parser("validate", help="check maps against the game's loading rules")
     s.add_argument("paths", nargs="+"); s.set_defaults(fn=cmd_validate)
 
-    s = sub.add_parser("verify", help="check that unpack->pack reproduces the file byte for byte")
+    s = sub.add_parser("verify", help="check that unpack->pack reproduces the file")
     s.add_argument("files", nargs="+"); s.set_defaults(fn=cmd_verify)
-
-    s = sub.add_parser("payload", help="dump the inflated payload as binary (any container version)")
-    s.add_argument("file"); s.add_argument("-o", "--output", help="output file, or - for stdout (default: <file>.payload.bin)")
-    s.set_defaults(fn=cmd_payload)
 
     s = sub.add_parser("new", help="create a flat empty map folder to start from")
     s.add_argument("folder"); s.add_argument("--name", default="New map"); s.add_argument("--author", default="")
-    s.add_argument("--size", type=float, default=1024.0, help="map size in metres (128..8000)")
-    s.add_argument("--height-points", type=int, default=513); s.add_argument("--paint-resolution", type=int, default=512)
+    s.add_argument("--size", type=float, default=1024.0, help="map size in metres (128..8000, multiple of 16)")
+    s.add_argument("--height-res", "--height-points", dest="height_res", type=int, default=0,
+                   help="heightmap samples per side: 129, 257, 513, 1025 or 2049 (default: by map size)")
+    s.add_argument("--paint-resolution", type=int, default=0,
+                   help="paint texels per side: 128, 256, 512 or 1024 (default: by map size)")
     s.add_argument("--floor", type=float, default=2.0, help="flat terrain height in metres")
     s.add_argument("-f", "--force", action="store_true"); s.set_defaults(fn=cmd_new)
 

@@ -1,59 +1,61 @@
-"""High level load / save."""
+"""Load / save .swmap files. The format itself is swformats' job; this only adds what unpack -> pack needs."""
 from __future__ import annotations
+import zlib
+from dataclasses import dataclass, field
 from pathlib import Path
 
-from swmap.binio import FormatError
-from .container import compress, read_container, write_container
-from .props import READ_VERSIONS, version_for
-from .payload import decode_payload, encode_payload
-from .model import SwMap
-from .caps import compute_caps
+from swformats import swmap as sw
+
+DEFAULT_LEVEL = 9                       # what swformats writes
+_LEVELS_TO_TRY = (9, 6, 7, 8, 5, 4, 3, 2, 1)   # the game's files have been seen with 6 and 9
 
 
-DEFAULT_LEVEL = 6
-_LEVELS_TO_TRY = (6, 9, 7, 8, 5, 4, 3, 2, 1)
+@dataclass
+class MapFile:
+    """A map plus the one thing swformats does not keep: the zlib level of the stream it was read from,
+    so that writing the map back reproduces the original bytes whenever the same zlib produced them."""
+    map: sw.SwMap
+    level: int = DEFAULT_LEVEL
+    notes: list = field(default_factory=list)       # things read_folder() noticed (e.g. paint weights above 255)
+
+    def dumps(self, level: int | None = None) -> bytes:
+        return sw.write(self.map, self.level if level is None else level)
+
+    def save(self, path, level: int | None = None) -> None:
+        Path(path).write_bytes(self.dumps(level))
 
 
-def _detect_level(data: bytes, payload: bytes) -> int:
-    """The game has written maps with different zlib levels (6 and 9 seen). Find the one that reproduces
-    the stored stream so that unpack -> pack stays byte-identical; fall back to the default."""
+def _leb(n: int) -> int:
+    return max(1, (n.bit_length() + 6) // 7)
+
+
+def deflated_body(data: bytes) -> bytes:
+    """The compressed body of a (valid) .swmap: everything after the header's bodyLength field."""
+    h = sw.read_header(data)
+    name, author = h.name.encode("utf-8"), h.author.encode("utf-8")
+    off = (4 + 2 + 16 + _leb(len(name)) + len(name) + _leb(len(author)) + len(author)
+           + 8 + 4 + 11 + 4 + len(h.preview_jpeg) + 4)
+    return data[off:]
+
+
+def inflated_body(data: bytes) -> bytes:
+    return zlib.decompress(deflated_body(data), -15)
+
+
+def _detect_level(data: bytes) -> int:
+    comp = deflated_body(data)
+    raw = zlib.decompress(comp, -15)
     for lvl in _LEVELS_TO_TRY:
-        if data.endswith(compress(payload, lvl)):
+        c = zlib.compressobj(lvl, zlib.DEFLATED, -15)
+        if c.compress(raw) + c.flush() == comp:
             return lvl
     return DEFAULT_LEVEL
 
 
-def loads(data: bytes) -> SwMap:
-    c = read_container(data)
-    version = c.header.version
-    if version not in READ_VERSIONS:
-        raise FormatError(f"unsupported version {version}")
-    env, terr, props = decode_payload(c.payload, version)
-    m = SwMap(c.header, env, terr, props, c.preview_jpg)
-    m.source_version = version                    # as stored; dumps() always writes version_for(props)
-    # remembered so that dumps() reproduces the file exactly (not part of the model classes)
-    m.deflate_level = _detect_level(data, c.payload)
-    m.loaded_from_file = True
-    return m
+def loads(data: bytes, max_bytes: int = sw.MAX_LOCAL_FILE_BYTES) -> MapFile:
+    m = sw.read(data, max_bytes)          # strict: raises swformats.FormatError for anything the game rejects
+    return MapFile(m, _detect_level(data))
 
 
-def load(path) -> SwMap:
-    return loads(Path(path).read_bytes())
-
-
-def dumps(m: SwMap, level: int | None = None) -> bytes:
-    """Serialise to .swmap bytes. level=None keeps the zlib level the map was loaded with (default 6).
-    A map built in memory without a preview gets a generated top-down placeholder (stored on
-    m.preview_jpg); a loaded map is written back exactly as it was, even if it has no preview."""
-    if level is None:
-        level = getattr(m, "deflate_level", DEFAULT_LEVEL)
-    if not m.preview_jpg and not getattr(m, "loaded_from_file", False):
-        from .preview import render_preview
-        m.preview_jpg = render_preview(m.terrain, m.header.size_m)
-    version = version_for(m.props)        # the game rejects any other version than this one
-    return write_container(m.header, compute_caps(m.props), m.preview_jpg,
-                           encode_payload(m.environment, m.terrain, m.props, version), level, version)
-
-
-def save(m: SwMap, path, level: int | None = None):
-    Path(path).write_bytes(dumps(m, level))
+def load(path, max_bytes: int = sw.MAX_LOCAL_FILE_BYTES) -> MapFile:
+    return loads(Path(path).read_bytes(), max_bytes)
